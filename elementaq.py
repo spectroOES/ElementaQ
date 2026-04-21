@@ -4,13 +4,15 @@ import numpy as np
 import re
 import io
 
-st.set_page_config(page_title="ElementaQ v3.4", layout="wide")
+st.set_page_config(page_title="ElementaQ v3.6", layout="wide")
 
 # --- 1. ПАНЕЛЬ УПРАВЛЕНИЯ (SIDEBAR) ---
 st.sidebar.header("Global Control Settings")
 rsd_limit = st.sidebar.slider("RSD Threshold (%)", 1.0, 25.0, 10.0)
 drift_limit = st.sidebar.slider("CCV Drift Limit (%)", 1.0, 20.0, 10.0)
 blank_max = st.sidebar.slider("Blank Max Threshold (abs)", 0.0, 1.0, 0.050, step=0.005)
+# Тот самый лимит в 20%, о котором мы говорили
+blank_tolerance = st.sidebar.slider("Blank Tolerance (%)", 5.0, 50.0, 20.0)
 
 def clean_num(text):
     if pd.isna(text) or text == "": return 0.0
@@ -26,11 +28,11 @@ def get_metadata(label):
     return (float(t_match.group(1)) if t_match else None), (float(d_match.group(1)) if d_match else 1.0)
 
 # --- 2. ИНТЕРФЕЙС ---
-st.title("🧪 ElementaQ v3.4")
+st.title("🧪 ElementaQ v3.6")
+st.caption("PhD Metrology Engine | 20% Blank Tolerance Logic")
 
 if 'step1_df' not in st.session_state: st.session_state.step1_df = None
 if 'res_df' not in st.session_state: st.session_state.res_df = None
-if 'aud_df' not in st.session_state: st.session_state.aud_df = None
 
 uploaded_file = st.file_uploader("Upload Qtegra CSV", type="csv")
 
@@ -70,7 +72,7 @@ if uploaded_file:
                 r_row, a_row = {'Index': idx, 'Label': row['Label'], 'Type': row['Type']}, {'Index': idx, 'Label': row['Label']}
                 
                 for el in elements:
-                    # Drift Correction Logic [cite: 32, 33, 179]
+                    # Поиск CCV
                     ccv_pool = []
                     stds = df[df['Target'].notnull()]
                     for _, s in stds.iterrows():
@@ -84,7 +86,7 @@ if uploaded_file:
                         r_row[el], a_row[el] = "NO VALID CCV", "FAIL"
                         continue
 
-                    # Factor fi Interpolation [cite: 38, 39, 190]
+                    # Интерполяция f
                     idxs = [c['idx'] for c in ccv_pool]
                     if len(ccv_pool) == 1 or idx <= idxs[0]: fi = ccv_pool[0]['f']
                     elif idx >= idxs[-1]: fi = ccv_pool[-1]['f']
@@ -95,23 +97,26 @@ if uploaded_file:
                                 fi = fs + (fe - fs) * (idx - idxs[n]) / (idxs[n+1] - idxs[n])
                                 break
 
-                    # Master Equation [cite: 42, 205-207]
+                    # Master Equation
                     raw_v = clean_num(row[el])
                     c_drift = raw_v * fi if row['Type'] in ['S', 'BLK', 'MBB'] else raw_v
                     
-                    # Blank Subtraction [cite: 25, 173]
-                    blks = df[df['Type'].isin(['BLK', 'MBB'])]
-                    d_blks = [clean_num(b[el]) * ccv_pool[0]['f'] for _, b in blks.iterrows()]
-                    avg_b = np.mean(d_blks) if d_blks else 0.0
+                    # Логика Бланков
+                    all_blks = df[df['Type'].isin(['BLK', 'MBB'])]
+                    drift_blks = [clean_num(b[el]) * ccv_pool[0]['f'] for _, b in all_blks.iterrows()]
+                    avg_b = np.mean(drift_blks) if drift_blks else 0.0
                     
-                    # QA Check: Blank Threshold
-                    b_status = "" if avg_b <= blank_max else " (BLANK WARNING)"
+                    # --- КРИТЕРИЙ ВАЛИДАЦИИ 20% ---
+                    warnings = []
+                    # Если значение бланка отклоняется от нормы более чем на заданный процент
+                    if avg_b > blank_max * (1 + blank_tolerance/100):
+                        warnings.append("Blank Error >20%")
                     
                     c_net = c_drift - (avg_b if row['Type'] == 'S' else 0.0)
                     final = c_net * row['Dilution']
                     
                     r_row[el] = f"{final:.4e}" if 0 < abs(final) < 1e-6 else f"{final:.9f}"
-                    a_row[el] = f"f:{fi:.3f}|B:{avg_b:.1e}{b_status}"
+                    a_row[el] = f"f:{fi:.3f}|B:{avg_b:.1e}" + (f" ({', '.join(warnings)})" if warnings else "")
                 
                 res_list.append(r_row); aud_list.append(a_row)
             
@@ -125,9 +130,10 @@ if uploaded_file:
             st.subheader("3. Metrological Audit Log")
             st.dataframe(st.session_state.aud_df)
 
-            # Export Logic
+            # --- ЭКСПОРТ ---
             report = io.StringIO()
-            report.write("ELEMENTAQ V3.4 REPORT\n" + "="*21 + "\n\n")
+            report.write("ELEMENTAQ V3.6 FULL REPORT\n" + "="*26 + "\n\n")
+            report.write(f"SETTINGS: RSD<{rsd_limit}%, Drift<{drift_limit}%, BlankMax={blank_max}, Tolerance={blank_tolerance}%\n\n")
             report.write("--- SECTION 1: INPUT ---\n")
             st.session_state.step1_df.to_csv(report, index=False)
             report.write("\n--- SECTION 2: RESULTS ---\n")
@@ -135,4 +141,4 @@ if uploaded_file:
             report.write("\n--- SECTION 3: AUDIT ---\n")
             st.session_state.aud_df.to_csv(report, index=False)
             
-            st.download_button("📥 Download Final Report", report.getvalue(), "ElementaQ_v3.4.csv", "text/csv")
+            st.download_button("📥 Download Report (v3.6)", report.getvalue(), "ElementaQ_Report_v36.csv", "text/csv")
