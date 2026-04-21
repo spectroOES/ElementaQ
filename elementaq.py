@@ -6,9 +6,9 @@ import io
 
 st.set_page_config(page_title="ElementaQ - Full Metrology Suite", layout="wide", page_icon="🧪")
 
-# --- Вспомогательные функции ---
+# --- Helper Functions ---
 def parse_metadata(name):
-    """Извлекает целевое значение и фактор разбавления из Label"""
+    """Extracts target value and dilution factor from Label"""
     target_match = re.search(r'_(\d+\.?\d*)$', str(name))
     dilution_match = re.search(r'_dil(\d+\.?\d*)', str(name))
     target = float(target_match.group(1)) if target_match else None
@@ -16,7 +16,7 @@ def parse_metadata(name):
     return target, dilution
 
 def format_value(val, is_lq=False):
-    """Форматирование: научная нотация для следов, 9 знаков для остального"""
+    """Formatting: scientific for trace, 9 decimals for general"""
     if is_lq:
         prefix = "<"
         val = max(abs(val), 1e-12)
@@ -28,7 +28,7 @@ def format_value(val, is_lq=False):
         return f"{prefix}{val:.9f}"
 
 def calculate_drift_factor(idx, ccv_map, target_val):
-    """Линейная интерполяция дрейфа между стандартами CCV"""
+    """Linear interpolation of drift between CCV standards"""
     indices = sorted(ccv_map.keys())
     if not indices: return 1.0
     if len(indices) == 1: return target_val / ccv_map[indices[0]]
@@ -44,9 +44,9 @@ def calculate_drift_factor(idx, ccv_map, target_val):
             return target_val / interp_response
     return 1.0
 
-# --- Интерфейс и Боковая панель (Sidebar) ---
+# --- Interface ---
 st.title("🧪 ElementaQ: Integrated Analytical Suite")
-st.write("Professional ICP Data Processing (v0.7)")
+st.write("Professional ICP Data Processing Engine")
 st.markdown("---")
 
 st.sidebar.header("Phase 1: RSD Control")
@@ -56,14 +56,14 @@ rsd_high = st.sidebar.slider("Red Flag (!!)", 1.0, 25.0, 10.0)
 st.sidebar.header("Phase 2: Metrology")
 match_window = st.sidebar.slider("Match Window (%)", 0, 500, (20, 200))
 
-uploaded_file = st.file_uploader("Загрузите CSV файл из Qtegra", type="csv")
+uploaded_file = st.file_uploader("Upload Qtegra CSV File", type="csv")
 
 if uploaded_file:
     raw_df = pd.read_csv(uploaded_file)
     raw_df.columns = raw_df.columns.str.strip()
     elements = [col for col in raw_df.columns if col not in ['Category', 'Label', 'Type']]
     
-    # --- PHASE 1: Сжатие и RSD контроль ---
+    # --- PHASE 1: Compression & RSD Control ---
     final_p1 = []
     valid_rows = len(raw_df) - (len(raw_df) % 4)
     for i in range(0, valid_rows, 4):
@@ -89,19 +89,19 @@ if uploaded_file:
         final_p1.append(new_row)
     
     ph1_df = pd.DataFrame(final_p1)
-    st.write("## 🟢 ТАБЛИЦА 1: Стабильность и RSD")
+    st.write("## 🟢 TABLE 01: Stability & RSD Report")
     st.dataframe(ph1_df)
 
-    # --- PHASE 2: Метрологические расчеты ---
-    if st.button("🚀 Запустить расчет Phase 2 (Drift -> Blank -> Dilution)"):
-        st.write("## 🔵 ТАБЛИЦА 2: Финальные скорректированные результаты")
+    # --- PHASE 2: Metrological Corrections ---
+    if st.button("🚀 Run Phase 2: Drift -> Blank -> Dilution"):
+        st.write("## 🔵 TABLE 02: Final Corrected Results")
         
         ph1_df['Target'], ph1_df['Dilution'] = zip(*ph1_df['Label'].map(parse_metadata))
         ph1_df['Row_Idx'] = range(len(ph1_df))
         ph2_df = ph1_df.copy()
         
         for el in elements:
-            # Валидные CCV (без !! и с Target)
+            # 1. Filter Valid CCVs (exclude !!, must have Target)
             ccv_data = ph1_df[(ph1_df['Type'].str.contains('CCV')) & 
                               (~ph1_df[el].astype(str).str.contains('!!')) & 
                               (ph1_df['Target'].notnull())]
@@ -113,7 +113,7 @@ if uploaded_file:
             ccv_map = {idx: float(re.sub(r'[^0-9.eE-]', '', str(v).split('!')[0])) 
                        for idx, v in zip(ccv_data['Row_Idx'], ccv_data[el])}
 
-            # 1. Корректируем Instrumental Blanks (BLK) по дрейфу
+            # 2. Calculate Drift-Corrected Mean Instrumental Blank
             corrected_blanks = []
             blk_rows = ph1_df[ph1_df['Type'] == 'BLK']
             for idx, row in blk_rows.iterrows():
@@ -123,7 +123,30 @@ if uploaded_file:
             
             avg_blank_corrected = np.mean(corrected_blanks) if corrected_blanks else 0.0
 
-            # 2. Применение формулы к образцам (S)
+            # 3. Apply Final Metrology to All Rows
             for i, row in ph2_df.iterrows():
                 raw_val = float(re.sub(r'[^0-9.eE-]', '', str(row[el]).split('!')[0]))
                 is_lq = '<' in str(row[el])
+                stype = str(row['Type'])
+                
+                f_drift = calculate_drift_factor(i, ccv_map, target_v)
+                
+                # Subtraction Logic: Don't subtract blank from BLK or CCV types
+                sub_val = avg_blank_corrected if stype not in ['BLK', 'CCV'] else 0.0
+                
+                # Result = (Raw * Drift - Corrected_Blank) * Dilution
+                final_val = (raw_val * f_drift - sub_val) * row['Dilution']
+                ph2_df.at[i, el] = format_value(final_val, is_lq)
+
+        final_res = ph2_df.drop(columns=['Target', 'Dilution', 'Row_Idx'])
+        st.dataframe(final_res)
+        
+        # Export logic
+        output = io.StringIO()
+        output.write("PHASE 1: RSD STABILITY REPORT\n")
+        ph1_df.drop(columns=['Target', 'Dilution', 'Row_Idx']).to_csv(output, index=False)
+        output.write("\n\nPHASE 2: FINAL METROLOGICAL REPORT\n")
+        output.write(f"Sequence: Drift Correction (all) -> Mean Corrected Blank -> Subtraction & Dilution.\n")
+        
+        final_csv_data = output.getvalue() + final_res.to_csv(index=False)
+        st.download_button("📥 DOWNLOAD COMPLETE REPORT", final_csv_data, "ElementaQ_Final_Report.csv", "text/csv")
