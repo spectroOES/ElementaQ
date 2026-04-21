@@ -6,7 +6,6 @@ import io
 
 st.set_page_config(page_title="ElementaQ - Full Suite", layout="wide", page_icon="🧪")
 
-# --- HELPER FUNCTIONS ---
 def parse_metadata(name):
     target_match = re.search(r'_(\d+\.?\d*)$', str(name))
     dilution_match = re.search(r'_dil(\d+\.?\d*)', str(name))
@@ -15,13 +14,11 @@ def parse_metadata(name):
     return target, dilution
 
 def format_value(val, is_lq=False):
-    """Scientific notation for tiny values, 9 decimals for standard analytical range"""
     if is_lq:
         prefix = "<"
         val = max(abs(val), 1e-12)
     else:
         prefix = ""
-    
     if 0 < abs(val) < 1e-6:
         return f"{prefix}{val:.4e}"
     else:
@@ -40,20 +37,17 @@ def calculate_drift_factor(idx, ccv_map, target_val):
             return target_val / interp
     return 1.0
 
-# --- UI HEADER ---
 st.title("🧪 ElementaQ: Integrated Analytical Suite")
 st.markdown("---")
 
-# --- SIDEBAR SETTINGS ---
+# UI Settings
 st.sidebar.header("Phase 1: RSD Control")
 rsd_low = st.sidebar.slider("Yellow Flag (!)", 1.0, 15.0, 6.0)
 rsd_high = st.sidebar.slider("Red Flag (!!)", 1.0, 25.0, 10.0)
 
 st.sidebar.header("Phase 2: Metrology")
 match_window = st.sidebar.slider("Match Window (%)", 0, 500, (20, 200))
-mismatch_action = st.sidebar.selectbox("On Mismatch:", ["Warn only", "Skip Correction"])
 
-# --- FILE UPLOAD ---
 uploaded_file = st.file_uploader("Upload Qtegra CSV", type="csv")
 
 if uploaded_file:
@@ -61,87 +55,82 @@ if uploaded_file:
     raw_df.columns = raw_df.columns.str.strip()
     elements = [col for col in raw_df.columns if col not in ['Category', 'Label', 'Type']]
     
-    # --- PHASE 1: COMPRESSION & RSD FILTERING ---
-    st.write("## 🟢 TABLE 1: Phase 1 (Stability Analysis & RSD Flags)")
-    final_phase1 = []
+    # --- PHASE 1 ---
+    st.write("## 🟢 STEP 01: Stability Analysis (RSD)")
+    final_p1 = []
     total_rows = len(raw_df)
     valid_rows = total_rows - (total_rows % 4)
 
     for i in range(0, valid_rows, 4):
         block = raw_df.iloc[i : i + 4].copy()
         label = str(block['Label'].iloc[0]).strip()
-        stype = str(block['Type'].iloc[0]).strip()
-        new_row = {'Label': label, 'Type': stype}
+        stype = str(block['Type'].iloc[0]).strip().upper() # Чистим Type
         
+        new_row = {'Label': label, 'Type': stype}
         for el in elements:
             try:
-                avg_val = block[block['Category'].str.contains('average', case=False, na=False)][el].values[0]
-                rsd_val = float(block[block['Category'].str.contains('RSD', case=False, na=False)][el].values[0])
-                is_lq = '<LQ' in str(avg_val)
-                clean_avg = float(re.sub(r'[^0-9.eE-]', '', str(avg_val).split('<')[0])) 
+                avg_v = block[block['Category'].str.contains('average', case=False, na=False)][el].values[0]
+                rsd_v = float(block[block['Category'].str.contains('RSD', case=False, na=False)][el].values[0])
+                is_lq = '<LQ' in str(avg_v)
+                clean_v = float(re.sub(r'[^0-9.eE-]', '', str(avg_v).split('<')[0]))
                 
-                res = format_value(clean_avg, is_lq)
+                res = format_value(clean_v, is_lq)
                 if not is_lq:
-                    if rsd_val > rsd_high: res += "!!"
-                    elif rsd_val > rsd_low: res += "!"
+                    if rsd_v > rsd_high: res += "!!"
+                    elif rsd_v > rsd_low: res += "!"
                 new_row[el] = res
-            except:
-                new_row[el] = "0.000000000"
-        final_phase1.append(new_row)
+            except: new_row[el] = "0.000000000"
+        final_p1.append(new_row)
     
-    ph1_df = pd.DataFrame(final_phase1)
+    ph1_df = pd.DataFrame(final_p1)
     st.dataframe(ph1_df)
-    
-    # Download Phase 1
-    csv_ph1 = ph1_df.to_csv(index=False).encode('utf-8-sig')
-    st.download_button("📥 DOWNLOAD PHASE 1 (RSD Report)", csv_ph1, "ElementaQ_PH1_Stability_Report.csv", "text/csv")
 
-    st.markdown("---")
-
-    # --- PHASE 2: METROLOGICAL CALCULATION ---
-    if st.button("🚀 Run Phase 2: Apply Drift, Blanks & Dilution"):
-        st.write("## 🔵 TABLE 2: Phase 2 (Final Metrological Results)")
-        
+    # --- PHASE 2 ---
+    if st.button("🚀 Run Phase 2: Calculate Metrology"):
+        st.write("## 🔵 STEP 02: Final Corrected Results")
         ph1_df['Target'], ph1_df['Dilution'] = zip(*ph1_df['Label'].map(parse_metadata))
         ph1_df['Row_Idx'] = range(len(ph1_df))
         ph2_df = ph1_df.copy()
         
         for el in elements:
+            # 1. CCV Drift Map
             ccv_data = ph1_df[ph1_df['Type'] == 'CCV']
-            if ccv_data.empty: continue
-            
+            target_v = None
             ccv_map = {}
-            for idx, val in zip(ccv_data['Row_Idx'], ccv_data[el]):
-                num_val = float(re.sub(r'[^0-9.eE-]', '', str(val).split('!')[0]))
-                ccv_map[idx] = num_val if abs(num_val) > 1e-15 else 1.0
+            if not ccv_data.empty:
+                target_v = ccv_data['Target'].iloc[0]
+                ccv_map = {idx: float(re.sub(r'[^0-9.eE-]', '', str(v).split('!')[0])) 
+                           for idx, v in zip(ccv_data['Row_Idx'], ccv_data[el])}
             
-            target_val = ph1_df[ph1_df['Type'] == 'CCV']['Target'].iloc[0]
-            blanks = ph1_df[ph1_df['Type'] == 'BLK'][el].apply(lambda x: float(re.sub(r'[^0-9.eE-]', '', str(x).split('!')[0])))
+            # 2. Instrumental Blank (ONLY BLK)
+            # Мы берем только те строки, где Type строго равен 'BLK'
+            blanks = ph1_df[ph1_df['Type'] == 'BLK'][el].apply(
+                lambda x: float(re.sub(r'[^0-9.eE-]', '', str(x).split('!')[0]))
+            )
             avg_blank = blanks.mean() if not blanks.empty else 0.0
             
+            # 3. Calculation Loop
             for i, row in ph2_df.iterrows():
-                raw_str = str(row[el])
-                is_lq = '<' in raw_str
-                val = float(re.sub(r'[^0-9.eE-]', '', raw_str.split('!')[0]))
+                # MBB и BLK не должны пересчитываться сами через себя (опционально), 
+                # но для чистоты вычтем фон из всех S и CCV
+                val = float(re.sub(r'[^0-9.eE-]', '', str(row[el]).split('!')[0]))
+                is_lq = '<' in str(row[el])
                 
-                is_matched = True
-                if target_val and val > 0:
-                    ratio = (val / target_val) * 100
-                    if not (match_window[0] <= ratio <= match_window[1]):
-                        is_matched = False
+                f_drift = calculate_drift_factor(i, ccv_map, target_v) if target_v else 1.0
                 
-                f_drift = 1.0
-                if target_val and (is_matched or mismatch_action == "Warn only"):
-                    f_drift = calculate_drift_factor(i, ccv_map, target_val)
-                
-                final_val = (val * f_drift - avg_blank) * row['Dilution']
-                res_str = format_value(final_val, is_lq)
-                if not is_matched and not is_lq: res_str += " (!)"
-                ph2_df.at[i, el] = res_str
+                # Итоговая формула: (Значение * Дрейф - Бланк) * Разбавление
+                corrected = (val * f_drift - avg_blank) * row['Dilution']
+                ph2_df.at[i, el] = format_value(corrected, is_lq)
 
-        final_display = ph2_df.drop(columns=['Target', 'Dilution', 'Row_Idx'])
-        st.dataframe(final_display)
+        final_res = ph2_df.drop(columns=['Target', 'Dilution', 'Row_Idx'])
+        st.dataframe(final_res)
         
-        # Download Phase 2
-        csv_ph2 = final_display.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 DOWNLOAD PHASE 2 (Final Metrological Report)", csv_ph2, "ElementaQ_PH2_Final_Corrected.csv", "text/csv")
+        # Combined Download
+        output = io.StringIO()
+        output.write("STEP 01: RSD STABILITY REPORT\n")
+        ph1_df.drop(columns=['Target', 'Dilution', 'Row_Idx']).to_csv(output, index=False)
+        output.write("\n\nSTEP 02: FINAL METROLOGICAL REPORT\n")
+        output.write(f"(Note: Background subtracted using ONLY 'BLK' codes. MBB values were monitored but not subtracted.)\n")
+        final_res.to_csv(output, index=False)
+        
+        st.download_button("📥 DOWNLOAD COMPLETE REPORT", output.getvalue(), "ElementaQ_Full_Report.csv", "text/csv")
