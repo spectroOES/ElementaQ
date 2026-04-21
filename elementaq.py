@@ -4,7 +4,7 @@ import numpy as np
 import re
 import io
 
-st.set_page_config(page_title="ElementaQ - Final Drift Control", layout="wide", page_icon="🧪")
+st.set_page_config(page_title="ElementaQ - Audit Suite v1.6", layout="wide", page_icon="🧪")
 
 # --- Core Functions ---
 def parse_metadata(name):
@@ -54,7 +54,7 @@ if 'ph1_df' not in st.session_state: st.session_state.ph1_df = None
 if 'ph2_results' not in st.session_state: st.session_state.ph2_results = None
 
 st.title("🧪 ElementaQ: Analytical Audit Suite")
-st.write("Strict Drift Logic: S & BLK Only | v1.5")
+st.write("Selective Correction & Full Export | v1.6")
 st.markdown("---")
 
 uploaded_file = st.file_uploader("Upload Qtegra CSV File", type="csv")
@@ -105,7 +105,7 @@ if uploaded_file:
                 target_v = ccv_rows['Target'].iloc[0]
                 ccv_map = {idx: safe_float(v.split('!')[0]) for idx, v in zip(ccv_rows['Row_Idx'], ccv_rows[el])}
                 
-                # Blank calculation (always drift-corrected)
+                # Drift-corrected average blank
                 blanks = [safe_float(r[el].split('!')[0]) * calculate_drift_factor(idx, ccv_map, target_v) 
                           for idx, r in ph1[ph1['Type'] == 'BLK'].iterrows()]
                 avg_b = np.mean(blanks) if blanks else 0.0
@@ -114,13 +114,10 @@ if uploaded_file:
                     val_raw = safe_float(row[el].split('!')[0])
                     stype = str(row['Type']).upper()
                     
-                    # STRICT DRIFT LOGIC: Only S and BLK
-                    if stype in ['S', 'BLK']:
-                        d_factor = calculate_drift_factor(i, ccv_map, target_v)
-                    else:
-                        d_factor = 1.0
+                    # 1. Drift Correction: ONLY S and BLK
+                    d_factor = calculate_drift_factor(i, ccv_map, target_v) if stype in ['S', 'BLK'] else 1.0
                     
-                    # Blank subtraction: Only S and MBB
+                    # 2. Blank Subtraction: ONLY S and MBB (Not from BLK itself!)
                     sub_val = avg_b if stype in ['S', 'MBB'] else 0.0
                     
                     final_v = (val_raw * d_factor - sub_val) * row['Dilution']
@@ -131,14 +128,23 @@ if uploaded_file:
 
     if st.session_state.ph2_results:
         res, log = st.session_state.ph2_results
-        st.write("### 🔵 TABLE 02: Final Corrected Results")
+        st.write("### 🔵 TABLE 02: Final Results")
         st.dataframe(res.drop(columns=['Target', 'Dilution', 'Row_Idx']))
         st.write("### 📜 TABLE 03: Calculation Audit Trail")
         st.dataframe(log.drop(columns=['Target', 'Dilution', 'Row_Idx']))
 
+        # Complete Multi-Table Report Generation
         out = io.StringIO()
-        out.write("ELEMENTAQ v1.5 REPORT\n\nTABLE 02: RESULTS\n")
+        out.write("ELEMENTAQ v1.6 COMPREHENSIVE REPORT\n")
+        out.write("="*40 + "\n\n")
+        
+        out.write("PHASE 1: RSD STABILITY (INPUT DATA)\n")
+        st.session_state.ph1_df.to_csv(out, index=False)
+        
+        out.write("\n\nPHASE 2: METROLOGICALLY CORRECTED RESULTS\n")
         res.drop(columns=['Target', 'Dilution', 'Row_Idx']).to_csv(out, index=False)
-        out.write("\n\nTABLE 03: AUDIT TRAIL\n")
+        
+        out.write("\n\nPHASE 3: CALCULATION AUDIT TRAIL\n")
         log.drop(columns=['Target', 'Dilution', 'Row_Idx']).to_csv(out, index=False)
-        st.download_button("📥 DOWNLOAD AUDIT PACKAGE", out.getvalue(), "ElementaQ_v15.csv", "text/csv")
+        
+        st.download_button("📥 DOWNLOAD COMPLETE REPORT (ALL TABLES)", out.getvalue(), "ElementaQ_Full_Report_v16.csv", "text/csv")
