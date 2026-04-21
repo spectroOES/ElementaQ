@@ -4,16 +4,16 @@ import numpy as np
 import re
 import io
 
-st.set_page_config(page_title="ElementaQ v2.4 - Metrology Engine", layout="wide", page_icon="🧪")
+# 1. Page Config
+st.set_page_config(page_title="ElementaQ v2.5 - Stable Engine", layout="wide", page_icon="🧪")
 
-# --- UI: Global Settings ---
-st.sidebar.header("Control Parameters")
+# 2. FIXED SIDEBAR (Always first to prevent disappearing)
+st.sidebar.header("Global Control Settings")
 rsd_limit = st.sidebar.slider("RSD Threshold (%)", 1.0, 25.0, 10.0)
 drift_threshold = st.sidebar.slider("CCV Drift Limit (%)", 1.0, 20.0, 10.0)
 
-# --- Helper Functions ---
+# 3. Helper Functions
 def safe_parse(text):
-    """Clean strings and convert to float."""
     if pd.isna(text) or text == "": return 0.0
     s = str(text).split('<')[-1].split('!')[0].strip()
     clean = re.sub(r'[^0-9.eE-]', '', s)
@@ -21,24 +21,23 @@ def safe_parse(text):
     except: return 0.0
 
 def parse_metadata(label):
-    """Extract Target and Dilution from Label."""
     lb = str(label)
     t = re.search(r'[_.]?(\d+\.?\d*)$', lb)
     d = re.search(r'_dil(\d+\.?\d*)', lb)
     return float(t.group(1)) if t else None, float(d.group(1)) if d else 1.0
 
 def format_output(v, is_lq=False):
-    """Standard scientific formatting."""
     p = "<" if is_lq else ""
     val = max(abs(v), 1e-12) if is_lq else v
     return f"{p}{val:.4e}" if 0 < abs(val) < 1e-6 else f"{p}{val:.9f}"
 
-# --- State Management ---
+# 4. State Management
 if 'st1_data' not in st.session_state: st.session_state.st1_data = None
 if 'final_tables' not in st.session_state: st.session_state.final_tables = None
 
-st.title("🧪 ElementaQ: Analytical Audit Suite (v2.4)")
-st.caption("Hybrid Drift Model (Point/Linear) & Master Equation Logic")
+# 5. Main UI
+st.title("🧪 ElementaQ: Analytical Audit Suite (v2.5)")
+st.caption("Stable Sidebar & Hybrid Metrology Logic")
 
 uploaded_file = st.file_uploader("Upload Qtegra CSV File", type="csv")
 
@@ -47,7 +46,7 @@ if uploaded_file:
     raw.columns = raw.columns.str.strip()
     elements = [c for c in raw.columns if c not in ['Category', 'Label', 'Type']]
 
-    # STEP 1: Compression & Indexing
+    # STEP 1: Compression
     if st.button("📊 Step 1: Process Structure & RSD"):
         processed = []
         for i in range(0, len(raw) - (len(raw)%4), 4):
@@ -69,7 +68,7 @@ if uploaded_file:
         st.write("### Table 1: Indexed Input Data")
         st.dataframe(st.session_state.st1_data)
 
-        # STEP 2: Metrology (Master Equation)
+        # STEP 2: Metrology
         if st.button("🚀 Step 2: Run Drift & Blank Correction"):
             p1 = st.session_state.st1_data.copy()
             p1['Target'], p1['Dilution'] = zip(*p1['Label'].map(parse_metadata))
@@ -82,7 +81,6 @@ if uploaded_file:
                 aud_entry = {'Index': idx, 'Label': row['Label'], 'Type': row['Type']}
 
                 for el in elements:
-                    # Filter valid CCVs (within drift threshold)
                     ccv_pool = []
                     all_ccvs = p1[(p1['Type'] == 'CCV') & (p1['Target'].notnull())]
                     for _, c in all_ccvs.iterrows():
@@ -90,41 +88,34 @@ if uploaded_file:
                         if m_val != 0:
                             recovery = (m_val / c['Target']) * 100
                             if (100 - drift_threshold) <= recovery <= (100 + drift_threshold):
-                                ccv_pool.append({'idx': c['Index'], 'meas': m_val, 'target': c['Target']})
+                                ccv_pool.append({'idx': c['idx'], 'meas': m_val, 'target': c['Target']}) if 'idx' in c else ccv_pool.append({'idx': c['Index'], 'meas': m_val, 'target': c['Target']})
                     
                     if not ccv_pool:
                         res_entry[el], aud_entry[el] = "NO VALID CCV", "N/A"
                         continue
 
-                    # Hybrid Drift Correction Model (Chapters 4 & 5)
+                    # Linear or Point Correction
                     if len(ccv_pool) == 1:
                         f_i = ccv_pool[0]['target'] / ccv_pool[0]['meas']
                     else:
                         c_idxs = [c['idx'] for c in ccv_pool]
-                        if idx <= c_idxs[0]:
-                            f_i = ccv_pool[0]['target'] / ccv_pool[0]['meas']
-                        elif idx >= c_idxs[-1]:
-                            f_i = ccv_pool[-1]['target'] / ccv_pool[-1]['meas']
+                        if idx <= c_idxs[0]: f_i = ccv_pool[0]['target'] / ccv_pool[0]['meas']
+                        elif idx >= c_idxs[-1]: f_i = ccv_pool[-1]['target'] / ccv_pool[-1]['meas']
                         else:
                             for n in range(len(c_idxs)-1):
                                 if c_idxs[n] <= idx <= c_idxs[n+1]:
-                                    f_start = ccv_pool[n]['target'] / ccv_pool[n]['meas']
-                                    f_end = ccv_pool[n+1]['target'] / ccv_pool[n+1]['meas']
-                                    f_i = f_start + (f_end - f_start) * (idx - c_idxs[n]) / (c_idxs[n+1] - c_idxs[n])
+                                    f_s = ccv_pool[n]['target'] / ccv_pool[n]['meas']
+                                    f_e = ccv_pool[n+1]['target'] / ccv_pool[n+1]['meas']
+                                    f_i = f_s + (f_e - f_s) * (idx - c_idxs[n]) / (c_idxs[n+1] - c_idxs[n])
                                     break
                     
-                    # Calculate Drift-Corrected Blank
+                    # Drift-Corrected Blank
                     blanks = p1[p1['Type'] == 'BLK']
-                    drift_blanks = []
-                    for _, b in blanks.iterrows():
-                        b_val = safe_parse(b[el])
-                        drift_blanks.append(b_val * (ccv_pool[0]['target'] / ccv_pool[0]['meas']))
+                    drift_blanks = [safe_parse(b[el]) * (ccv_pool[0]['target'] / ccv_pool[0]['meas']) for _, b in blanks.iterrows()]
                     avg_blank = np.mean(drift_blanks) if drift_blanks else 0.0
 
-                    # Master Equation: Result = (Measured * f_i - Blank) * Dilution
-                    raw_v = safe_parse(row[el])
-                    stype = row['Type']
-                    
+                    # Master Equation
+                    raw_v = safe_parse(row[el]); stype = row['Type']
                     f_applied = f_i if stype in ['S', 'BLK'] else 1.0
                     b_applied = avg_blank if stype in ['S', 'MBB'] else 0.0
                     
@@ -132,23 +123,18 @@ if uploaded_file:
                     res_entry[el] = format_output(final_v, '<' in str(row[el]))
                     aud_entry[el] = f"f:{f_applied:.4f}|B:{b_applied:.1e}"
 
-                res_rows.append(res_entry)
-                audit_rows.append(aud_entry)
+                res_rows.append(res_entry); audit_rows.append(aud_entry)
             
             st.session_state.final_tables = (pd.DataFrame(res_rows), pd.DataFrame(audit_rows))
 
     if st.session_state.final_tables:
         res_df, aud_df = st.session_state.final_tables
-        st.write("### Table 2: Final Corrected Results")
-        st.dataframe(res_df)
-        st.write("### Table 3: Metrological Audit Log")
-        st.dataframe(aud_df)
+        st.write("### Table 2: Corrected Results"); st.dataframe(res_df)
+        st.write("### Table 3: Metrological Audit"); st.dataframe(aud_df)
 
-        # CSV Export
         out = io.StringIO()
-        out.write("ELEMENTAQ v2.4 REPORT\n" + "="*20 + "\n")
-        out.write("\n1. PROCESSED INPUT\n"); st.session_state.st1_data.to_csv(out, index=False)
-        out.write("\n2. FINAL RESULTS\n"); res_df.to_csv(out, index=False)
-        out.write("\n3. AUDIT LOG\n"); aud_df.to_csv(out, index=False)
-        
-        st.download_button("📥 Download Report (CSV)", out.getvalue(), "ElementaQ_v24_Report.csv", "text/csv")
+        out.write("ELEMENTAQ v2.5 REPORT\n" + "="*20 + "\n")
+        out.write("\n1. INPUT\n"); st.session_state.st1_data.to_csv(out, index=False)
+        out.write("\n2. RESULTS\n"); res_df.to_csv(out, index=False)
+        out.write("\n3. AUDIT\n"); aud_df.to_csv(out, index=False)
+        st.download_button("📥 Download All Tables", out.getvalue(), "ElementaQ_v25.csv", "text/csv")
