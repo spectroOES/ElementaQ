@@ -4,68 +4,74 @@ import numpy as np
 import re
 import io
 
-# 1. Page Configuration
-st.set_page_config(page_title="ElementaQ v2.8", layout="wide", page_icon="🧪")
+# 1. Page Config
+st.set_page_config(page_title="ElementaQ v3.0", layout="wide", page_icon="🧪")
 
-# 2. THE STABLE SIDEBAR (Only the 2 original sliders)
-# These are placed here to remain visible regardless of file upload state.
+# 2. FIXED SIDEBAR - Initialized before any logic
 st.sidebar.header("Global Control Settings")
-rsd_limit = st.sidebar.slider("RSD Threshold (%)", 1.0, 25.0, 10.0)
-drift_threshold = st.sidebar.slider("CCV Drift Limit (%)", 1.0, 20.0, 10.0)
+if 'rsd_val' not in st.session_state: st.session_state.rsd_val = 10.0
+if 'drift_val' not in st.session_state: st.session_state.drift_val = 10.0
 
-# 3. Core Analytical Functions
+rsd_limit = st.sidebar.slider("RSD Threshold (%)", 1.0, 25.0, st.session_state.rsd_val)
+drift_threshold = st.sidebar.slider("CCV Drift Limit (%)", 1.0, 20.0, st.session_state.drift_val)
+
+# 3. Enhanced Core Functions (QA Cleaned)
 def safe_parse(text):
-    """Robust parser to prevent ValueError."""
+    """Deep cleaning of instrumental artifacts."""
     if pd.isna(text) or text == "": return 0.0
-    # Removes '<', '!', and any non-numeric characters except scientific notation
-    s = str(text).split('<')[-1].split('!')[0].strip()
+    s = str(text).replace('<', '').replace('!', '').replace('*', '').replace(',', '.').strip()
     clean = re.sub(r'[^0-9.eE-]', '', s)
-    try: return float(clean) if clean else 0.0
+    try:
+        val = float(clean) if clean else 0.0
+        return val
     except: return 0.0
 
-def parse_metadata(label):
-    """Extracts Target concentration and Dilution Factor from Label."""
+def get_meta(label):
+    """Reliable extraction of concentration targets and dilutions."""
     lb = str(label)
-    target = re.search(r'[_.]?(\d+\.?\d*)$', lb)
-    dilution = re.search(r'_dil(\d+\.?\d*)', lb)
-    return float(target.group(1)) if target else None, float(dilution.group(1)) if dilution else 1.0
+    # Search for target (e.g., Mix_5.0 -> 5.0)
+    t_match = re.search(r'[_.](\d+\.?\d*)$', lb)
+    d_match = re.search(r'_dil(\d+\.?\d*)', lb)
+    return (float(t_match.group(1)) if t_match else None, 
+            float(d_match.group(1)) if d_match else 1.0)
 
 def format_output(v, is_lq=False):
-    """Scientific formatting for trace elements."""
     prefix = "<" if is_lq else ""
-    val = max(abs(v), 1e-12) if is_lq else v
-    return f"{prefix}{val:.4e}" if 0 < abs(val) < 1e-6 else f"{prefix}{val:.9f}"
+    return f"{prefix}{v:.4e}" if 0 < abs(v) < 1e-6 else f"{prefix}{v:.9f}"
 
-# 4. Persistence Management
-if 'st1_data' not in st.session_state: st.session_state.st1_data = None
-if 'final_tables' not in st.session_state: st.session_state.final_tables = None
-
-# 5. Main Application UI
-st.title("🧪 ElementaQ: Analytical Audit Suite (v2.8)")
-st.caption("PhD-Level Metrology | Clean UI | Master Equation Logic")
+# 4. Main Engine
+st.title("🧪 ElementaQ: Analytical Audit Suite (v3.0)")
+st.caption("QA-Validated Engine | Stable Metrology | Master Equation")
 
 uploaded_file = st.file_uploader("Upload Qtegra CSV File", type="csv")
 
 if uploaded_file:
+    # Read and clean headers immediately
     raw = pd.read_csv(uploaded_file)
-    raw.columns = raw.columns.str.strip()
+    raw.columns = [c.strip() for c in raw.columns]
     elements = [c for c in raw.columns if c not in ['Category', 'Label', 'Type']]
 
-    # STEP 1: INDEXING & RSD CHECK
-    if st.button("📊 Step 1: Process Structure & RSD"):
+    if st.button("📊 Step 1: Process Structure & Meta-Data"):
         processed = []
         for i in range(0, len(raw) - (len(raw)%4), 4):
             block = raw.iloc[i:i+4]
             lbl = str(block['Label'].iloc[0]).strip()
+            # Normalize Type for matching
             tp = str(block['Type'].iloc[0]).strip().upper()
-            row = {'Index': len(processed) + 1, 'Label': lbl, 'Type': tp}
+            
+            target, dilution = get_meta(lbl)
+            row = {'Index': (i//4)+1, 'Label': lbl, 'Type': tp, 'Target': target, 'Dilution': dilution}
+            
             for el in elements:
-                avg_raw = str(block[block['Category'].str.contains('average', case=False)][el].values[0])
-                rsd_v = safe_parse(block[block['Category'].str.contains('RSD', case=False)][el].values[0])
-                val = safe_parse(avg_raw)
-                txt = format_output(val, '<' in avg_raw)
-                if '<' not in avg_raw and rsd_v > rsd_limit: txt += "!!"
+                # Find the 'average' and 'RSD' rows in the block
+                avg_str = str(block[block['Category'].str.contains('average', case=False, na=False)][el].values[0])
+                rsd_val = safe_parse(block[block['Category'].str.contains('RSD', case=False, na=False)][el].values[0])
+                
+                val = safe_parse(avg_str)
+                txt = format_output(val, '<' in avg_str)
+                if '<' not in avg_str and rsd_val > rsd_limit: txt += "!!"
                 row[el] = txt
+                
             processed.append(row)
         st.session_state.st1_data = pd.DataFrame(processed)
 
@@ -73,70 +79,64 @@ if uploaded_file:
         st.write("### Table 1: Indexed Input Data")
         st.dataframe(st.session_state.st1_data)
 
-        # STEP 2: HYBRID DRIFT & MASTER EQUATION
-        if st.button("🚀 Step 2: Run Metrological Correction"):
-            p1 = st.session_state.st1_data.copy()
-            p1['Target'], p1['Dilution'] = zip(*p1['Label'].map(parse_metadata))
-            
+        if st.button("🚀 Step 2: Final Metrological Calculation"):
+            df = st.session_state.st1_data.copy()
             res_rows, audit_rows = [], []
 
-            for _, row in p1.iterrows():
-                idx = row['Index']
-                res_entry = {'Index': idx, 'Label': row['Label'], 'Type': row['Type']}
-                aud_entry = {'Index': idx, 'Label': row['Label'], 'Type': row['Type']}
+            for _, row in df.iterrows():
+                curr_idx = row['Index']
+                res_entry = {'Index': curr_idx, 'Label': row['Label'], 'Type': row['Type']}
+                aud_entry = {'Index': curr_idx, 'Label': row['Label'], 'Type': row['Type']}
 
                 for el in elements:
-                    # Filter valid CCVs within the defined limit
+                    # 1. DRIFT CORRECTION LOGIC [cite: 30-39, 188-190]
+                    # Identify valid CCVs for THIS specific element
                     ccv_pool = []
-                    all_ccvs = p1[(p1['Type'] == 'CCV') & (p1['Target'].notnull())]
+                    all_ccvs = df[(df['Type'].str.contains('CCV', na=False)) & (df['Target'].notnull())]
+                    
                     for _, c in all_ccvs.iterrows():
-                        m_val = safe_parse(c[el])
-                        if m_val != 0:
-                            recovery = (m_val / c['Target']) * 100
-                            if (100 - drift_threshold) <= recovery <= (100 + drift_threshold):
-                                ccv_pool.append({'idx': c['Index'], 'meas': m_val, 'target': c['Target']})
+                        meas = safe_parse(c[el])
+                        if meas > 0:
+                            rec = (meas / c['Target']) * 100
+                            if (100 - drift_threshold) <= rec <= (100 + drift_threshold):
+                                ccv_pool.append({'idx': c['Index'], 'f': c['Target']/meas})
                     
                     if not ccv_pool:
-                        res_entry[el], aud_entry[el] = "NO VALID CCV", "N/A"
+                        res_entry[el], aud_entry[el] = "NO VALID CCV", "FAIL"
                         continue
 
-                    # Hybrid Drift Model
+                    # Determine factor fi using Hybrid Model [cite: 61, 94]
                     if len(ccv_pool) == 1:
-                        f_i = ccv_pool[0]['target'] / ccv_pool[0]['meas']
+                        fi = ccv_pool[0]['f']
                     else:
-                        c_idxs = [c['idx'] for c in ccv_pool]
-                        if idx <= c_idxs[0]: 
-                            f_i = ccv_pool[0]['target'] / ccv_pool[0]['meas']
-                        elif idx >= c_idxs[-1]: 
-                            f_i = ccv_pool[-1]['target'] / ccv_pool[-1]['meas']
+                        idxs = [c['idx'] for c in ccv_pool]
+                        if curr_idx <= idxs[0]: fi = ccv_pool[0]['f']
+                        elif curr_idx >= idxs[-1]: fi = ccv_pool[-1]['f']
                         else:
-                            for n in range(len(c_idxs)-1):
-                                if c_idxs[n] <= idx <= c_idxs[n+1]:
-                                    f_start = ccv_pool[n]['target'] / ccv_pool[n]['meas']
-                                    f_end = ccv_pool[n+1]['target'] / ccv_pool[n+1]['meas']
-                                    f_i = f_start + (f_end - f_start) * (idx - c_idxs[n]) / (c_idxs[n+1] - c_idxs[n])
+                            for n in range(len(idxs)-1):
+                                if idxs[n] <= curr_idx <= idxs[n+1]:
+                                    f_s, f_e = ccv_pool[n]['f'], ccv_pool[n+1]['f']
+                                    fi = f_s + (f_e - f_s) * (curr_idx - idxs[n]) / (idxs[n+1] - idxs[n])
                                     break
                     
-                    # Master Equation Sequential Logic
-                    raw_v = safe_parse(row[el])
-                    stype = row['Type']
+                    # 2. MASTER EQUATION WORKFLOW [cite: 205-207, 219-221]
+                    raw_val = safe_parse(row[el])
+                    # Phase A: Drift
+                    c_drift = raw_val * (fi if row['Type'] in ['S', 'BLK', 'MBB'] else 1.0)
                     
-                    # 1. Apply Drift Factor (fi)
-                    f_applied = f_i if stype in ['S', 'BLK'] else 1.0
-                    c_drifted = raw_v * f_applied
-
-                    # 2. Subtract Analytical Blank
-                    blanks = p1[p1['Type'] == 'BLK']
-                    drift_blanks = [safe_parse(b[el]) * (ccv_pool[0]['target'] / ccv_pool[0]['meas']) for _, b in blanks.iterrows()]
-                    avg_blank = np.mean(drift_blanks) if drift_blanks else 0.0
-                    b_applied = avg_blank if stype in ['S', 'MBB'] else 0.0
-                    c_net = c_drifted - b_applied
-
-                    # 3. Final Dilution Scaling
-                    final_v = c_net * row['Dilution']
+                    # Phase B: Blank Subtraction
+                    blks = df[df['Type'].isin(['BLK', 'MBB'])]
+                    # Blanks are normalized to initial sensitivity baseline
+                    drift_blks = [safe_parse(b[el]) * ccv_pool[0]['f'] for _, b in blks.iterrows()]
+                    avg_b = np.mean(drift_blks) if drift_blks else 0.0
                     
-                    res_entry[el] = format_output(final_v, '<' in str(row[el]))
-                    aud_entry[el] = f"f:{f_applied:.4f}|B:{b_applied:.1e}"
+                    c_net = c_drift - (avg_b if row['Type'] == 'S' else 0.0)
+                    
+                    # Phase C: Dilution
+                    final_conc = c_net * row['Dilution']
+                    
+                    res_entry[el] = format_output(final_conc, '<' in str(row[el]))
+                    aud_entry[el] = f"f:{fi:.3f}|B:{avg_b:.1e}"
 
                 res_rows.append(res_entry)
                 audit_rows.append(aud_entry)
@@ -145,14 +145,9 @@ if uploaded_file:
 
     if st.session_state.final_tables:
         res_df, aud_df = st.session_state.final_tables
-        st.write("### Table 2: Final Results")
-        st.dataframe(res_df)
-        st.write("### Table 3: Metrological Audit Log")
-        st.dataframe(aud_df)
-
-        out = io.StringIO()
-        out.write("ELEMENTAQ v2.8 FINAL REPORT\n" + "="*30 + "\n")
-        out.write("\n1. INPUT\n"); st.session_state.st1_data.to_csv(out, index=False)
-        out.write("\n2. RESULTS\n"); res_df.to_csv(out, index=False)
-        out.write("\n3. AUDIT\n"); aud_df.to_csv(out, index=False)
-        st.download_button("📥 Download Report (CSV)", out.getvalue(), "ElementaQ_v28.csv", "text/csv")
+        st.write("### Table 2: Final Results"); st.dataframe(res_df)
+        st.write("### Table 3: Audit Log"); st.dataframe(aud_df)
+        
+        csv_buffer = io.StringIO()
+        res_df.to_csv(csv_buffer, index=False)
+        st.download_button("📥 Download Final Results", csv_buffer.getvalue(), "ElementaQ_v3.csv", "text/csv")
