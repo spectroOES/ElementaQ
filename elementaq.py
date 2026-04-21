@@ -4,7 +4,7 @@ import numpy as np
 import re
 import io
 
-st.set_page_config(page_title="ElementaQ - Full Suite", layout="wide", page_icon="🧪")
+st.set_page_config(page_title="ElementaQ - Precision Suite", layout="wide", page_icon="🧪")
 
 def parse_metadata(name):
     target_match = re.search(r'_(\d+\.?\d*)$', str(name))
@@ -40,13 +40,10 @@ def calculate_drift_factor(idx, ccv_map, target_val):
 st.title("🧪 ElementaQ: Integrated Analytical Suite")
 st.markdown("---")
 
-# UI Settings
+# Sidebar Logic
 st.sidebar.header("Phase 1: RSD Control")
 rsd_low = st.sidebar.slider("Yellow Flag (!)", 1.0, 15.0, 6.0)
 rsd_high = st.sidebar.slider("Red Flag (!!)", 1.0, 25.0, 10.0)
-
-st.sidebar.header("Phase 2: Metrology")
-match_window = st.sidebar.slider("Match Window (%)", 0, 500, (20, 200))
 
 uploaded_file = st.file_uploader("Upload Qtegra CSV", type="csv")
 
@@ -64,7 +61,7 @@ if uploaded_file:
     for i in range(0, valid_rows, 4):
         block = raw_df.iloc[i : i + 4].copy()
         label = str(block['Label'].iloc[0]).strip()
-        stype = str(block['Type'].iloc[0]).strip().upper() # Чистим Type
+        stype = str(block['Type'].iloc[0]).strip().upper()
         
         new_row = {'Label': label, 'Type': stype}
         for el in elements:
@@ -86,15 +83,16 @@ if uploaded_file:
     st.dataframe(ph1_df)
 
     # --- PHASE 2 ---
-    if st.button("🚀 Run Phase 2: Calculate Metrology"):
+    if st.button("🚀 Run Phase 2: Targeted Metrology"):
         st.write("## 🔵 STEP 02: Final Corrected Results")
         ph1_df['Target'], ph1_df['Dilution'] = zip(*ph1_df['Label'].map(parse_metadata))
         ph1_df['Row_Idx'] = range(len(ph1_df))
         ph2_df = ph1_df.copy()
         
         for el in elements:
-            # 1. CCV Drift Map
-            ccv_data = ph1_df[ph1_df['Type'] == 'CCV']
+            # 1. Фильтруем CCV: исключаем те, у которых есть "!!" (RSD > 10%)
+            ccv_data = ph1_df[(ph1_df['Type'] == 'CCV') & (~ph1_df[el].astype(str).str.contains('!!'))]
+            
             target_v = None
             ccv_map = {}
             if not ccv_data.empty:
@@ -102,24 +100,26 @@ if uploaded_file:
                 ccv_map = {idx: float(re.sub(r'[^0-9.eE-]', '', str(v).split('!')[0])) 
                            for idx, v in zip(ccv_data['Row_Idx'], ccv_data[el])}
             
-            # 2. Instrumental Blank (ONLY BLK)
-            # Мы берем только те строки, где Type строго равен 'BLK'
+            # 2. Средний бланк (Instrumental Blank - ONLY BLK)
             blanks = ph1_df[ph1_df['Type'] == 'BLK'][el].apply(
                 lambda x: float(re.sub(r'[^0-9.eE-]', '', str(x).split('!')[0]))
             )
             avg_blank = blanks.mean() if not blanks.empty else 0.0
             
-            # 3. Calculation Loop
+            # 3. Применяем расчеты
             for i, row in ph2_df.iterrows():
-                # MBB и BLK не должны пересчитываться сами через себя (опционально), 
-                # но для чистоты вычтем фон из всех S и CCV
                 val = float(re.sub(r'[^0-9.eE-]', '', str(row[el]).split('!')[0]))
                 is_lq = '<' in str(row[el])
+                stype = row['Type']
                 
+                # Коэффициент дрейфа считаем для всех, но...
                 f_drift = calculate_drift_factor(i, ccv_map, target_v) if target_v else 1.0
                 
-                # Итоговая формула: (Значение * Дрейф - Бланк) * Разбавление
-                corrected = (val * f_drift - avg_blank) * row['Dilution']
+                # ЛОГИКА ВЫЧИТАНИЯ:
+                # Только для образцов (S). BLK, MBB и CCV остаются без вычитания фона.
+                subtraction_val = avg_blank if stype == 'S' else 0.0
+                
+                corrected = (val * f_drift - subtraction_val) * row['Dilution']
                 ph2_df.at[i, el] = format_value(corrected, is_lq)
 
         final_res = ph2_df.drop(columns=['Target', 'Dilution', 'Row_Idx'])
@@ -130,7 +130,7 @@ if uploaded_file:
         output.write("STEP 01: RSD STABILITY REPORT\n")
         ph1_df.drop(columns=['Target', 'Dilution', 'Row_Idx']).to_csv(output, index=False)
         output.write("\n\nSTEP 02: FINAL METROLOGICAL REPORT\n")
-        output.write(f"(Note: Background subtracted using ONLY 'BLK' codes. MBB values were monitored but not subtracted.)\n")
+        output.write(f"Logic: BLK subtracted only from 'S' types. CCVs with RSD > {rsd_high}% (!!) ignored for drift.\n")
         final_res.to_csv(output, index=False)
         
-        st.download_button("📥 DOWNLOAD COMPLETE REPORT", output.getvalue(), "ElementaQ_Full_Report.csv", "text/csv")
+        st.download_button("📥 DOWNLOAD COMPLETE REPORT", output.getvalue(), "ElementaQ_Final_Report.csv", "text/csv")
