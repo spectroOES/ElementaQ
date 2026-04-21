@@ -4,150 +4,137 @@ import numpy as np
 import re
 import io
 
-# 1. Page Config
-st.set_page_config(page_title="ElementaQ v3.0", layout="wide", page_icon="🧪")
+# 1. СТАБИЛЬНАЯ КОНФИГУРАЦИЯ
+st.set_page_config(page_title="ElementaQ v3.1", layout="wide")
 
-# 2. FIXED SIDEBAR - Initialized before any logic
+# Инициализация слайдеров в боковой панели (SIDEBAR)
 st.sidebar.header("Global Control Settings")
-if 'rsd_val' not in st.session_state: st.session_state.rsd_val = 10.0
-if 'drift_val' not in st.session_state: st.session_state.drift_val = 10.0
+rsd_limit = st.sidebar.slider("RSD Threshold (%)", 1.0, 25.0, 10.0, key='rsd_slider')
+drift_threshold = st.sidebar.slider("CCV Drift Limit (%)", 1.0, 20.0, 10.0, key='drift_slider')
 
-rsd_limit = st.sidebar.slider("RSD Threshold (%)", 1.0, 25.0, st.session_state.rsd_val)
-drift_threshold = st.sidebar.slider("CCV Drift Limit (%)", 1.0, 20.0, st.session_state.drift_val)
-
-# 3. Enhanced Core Functions (QA Cleaned)
-def safe_parse(text):
-    """Deep cleaning of instrumental artifacts."""
+# 2. ФУНКЦИИ ОЧИСТКИ И ПАРСИНГА
+def clean_val(text):
+    """Удаляет <, !, * и другие артефакты Qtegra"""
     if pd.isna(text) or text == "": return 0.0
-    s = str(text).replace('<', '').replace('!', '').replace('*', '').replace(',', '.').strip()
-    clean = re.sub(r'[^0-9.eE-]', '', s)
-    try:
-        val = float(clean) if clean else 0.0
-        return val
+    s = str(text).replace('<', '').replace('!', '').replace('*', '').strip()
+    res = re.sub(r'[^0-9.eE-]', '', s)
+    try: return float(res) if res else 0.0
     except: return 0.0
 
-def get_meta(label):
-    """Reliable extraction of concentration targets and dilutions."""
-    lb = str(label)
-    # Search for target (e.g., Mix_5.0 -> 5.0)
-    t_match = re.search(r'[_.](\d+\.?\d*)$', lb)
-    d_match = re.search(r'_dil(\d+\.?\d*)', lb)
-    return (float(t_match.group(1)) if t_match else None, 
-            float(d_match.group(1)) if d_match else 1.0)
+def extract_meta(label):
+    """Извлекает концентрацию из меток типа 'MixI 0.01' или 'CCV_0.1'"""
+    label_str = str(label)
+    # Ищем любое число в конце строки после пробела или подчеркивания
+    match = re.search(r'[_ ](\d+\.?\d*)$', label_str)
+    target = float(match.group(1)) if match else None
+    
+    dil_match = re.search(r'_dil(\d+\.?\d*)', label_str)
+    dilution = float(dil_match.group(1)) if dil_match else 1.0
+    return target, dilution
 
-def format_output(v, is_lq=False):
-    prefix = "<" if is_lq else ""
-    return f"{prefix}{v:.4e}" if 0 < abs(v) < 1e-6 else f"{prefix}{v:.9f}"
+# 3. ИНИЦИАЛИЗАЦИЯ ПАМЯТИ (SESSION STATE)
+if 'processed_df' not in st.session_state: st.session_state.processed_df = None
 
-# 4. Main Engine
-st.title("🧪 ElementaQ: Analytical Audit Suite (v3.0)")
-st.caption("QA-Validated Engine | Stable Metrology | Master Equation")
-
-uploaded_file = st.file_uploader("Upload Qtegra CSV File", type="csv")
+st.title("🧪 ElementaQ v3.1: Final Fix")
+uploaded_file = st.file_uploader("Upload CSV", type="csv")
 
 if uploaded_file:
-    # Read and clean headers immediately
-    raw = pd.read_csv(uploaded_file)
-    raw.columns = [c.strip() for c in raw.columns]
-    elements = [c for c in raw.columns if c not in ['Category', 'Label', 'Type']]
+    raw_data = pd.read_csv(uploaded_file)
+    raw_data.columns = [c.strip() for c in raw_data.columns]
+    elements = [c for c in raw_data.columns if c not in ['Category', 'Label', 'Type']]
 
-    if st.button("📊 Step 1: Process Structure & Meta-Data"):
-        processed = []
-        for i in range(0, len(raw) - (len(raw)%4), 4):
-            block = raw.iloc[i:i+4]
+    # ШАГ 1: ИНДЕКСАЦИЯ И МЕТАДАННЫЕ
+    if st.button("📊 Step 1: Process & Index"):
+        rows = []
+        for i in range(0, len(raw_data) - (len(raw_data)%4), 4):
+            block = raw_data.iloc[i:i+4]
             lbl = str(block['Label'].iloc[0]).strip()
-            # Normalize Type for matching
+            # Важно: берем тип и сразу чистим
             tp = str(block['Type'].iloc[0]).strip().upper()
+            target, dil = extract_meta(lbl)
             
-            target, dilution = get_meta(lbl)
-            row = {'Index': (i//4)+1, 'Label': lbl, 'Type': tp, 'Target': target, 'Dilution': dilution}
-            
+            entry = {'Index': (i//4)+1, 'Label': lbl, 'Type': tp, 'Target': target, 'Dilution': dil}
             for el in elements:
-                # Find the 'average' and 'RSD' rows in the block
-                avg_str = str(block[block['Category'].str.contains('average', case=False, na=False)][el].values[0])
-                rsd_val = safe_parse(block[block['Category'].str.contains('RSD', case=False, na=False)][el].values[0])
-                
-                val = safe_parse(avg_str)
-                txt = format_output(val, '<' in avg_str)
-                if '<' not in avg_str and rsd_val > rsd_limit: txt += "!!"
-                row[el] = txt
-                
-            processed.append(row)
-        st.session_state.st1_data = pd.DataFrame(processed)
+                val_raw = str(block[block['Category'].str.contains('average', case=False, na=False)][el].values[0])
+                rsd_raw = clean_val(block[block['Category'].str.contains('RSD', case=False, na=False)][el].values[0])
+                v = clean_val(val_raw)
+                # Форматирование для таблицы
+                txt = f"<{v:.4e}" if '<' in val_raw else f"{v:.9f}"
+                if '<' not in val_raw and rsd_raw > rsd_limit: txt += "!!"
+                entry[el] = txt
+            rows.append(entry)
+        
+        st.session_state.processed_df = pd.DataFrame(rows)
 
-    if st.session_state.st1_data is not None:
-        st.write("### Table 1: Indexed Input Data")
-        st.dataframe(st.session_state.st1_data)
+    # ОТОБРАЖЕНИЕ ТАБЛИЦЫ 1
+    if st.session_state.processed_df is not None:
+        st.write("### Table 1: Input Data (Ready for Calculation)")
+        st.dataframe(st.session_state.processed_df)
 
+        # ШАГ 2: РАСЧЕТ MASTER EQUATION
         if st.button("🚀 Step 2: Final Metrological Calculation"):
-            df = st.session_state.st1_data.copy()
-            res_rows, audit_rows = [], []
+            df = st.session_state.processed_df.copy()
+            res_list, aud_list = [], []
 
             for _, row in df.iterrows():
-                curr_idx = row['Index']
-                res_entry = {'Index': curr_idx, 'Label': row['Label'], 'Type': row['Type']}
-                aud_entry = {'Index': curr_idx, 'Label': row['Label'], 'Type': row['Type']}
+                idx = row['Index']
+                res_row = {'Index': idx, 'Label': row['Label'], 'Type': row['Type']}
+                aud_row = {'Index': idx, 'Label': row['Label'], 'Type': row['Type']}
 
                 for el in elements:
-                    # 1. DRIFT CORRECTION LOGIC [cite: 30-39, 188-190]
-                    # Identify valid CCVs for THIS specific element
+                    # ПОИСК CCV (Исправлено: ищем 'CCV' или 'MIX' в типе или метке)
                     ccv_pool = []
-                    all_ccvs = df[(df['Type'].str.contains('CCV', na=False)) & (df['Target'].notnull())]
+                    # Фильтруем все строки, где есть целевая концентрация (Target)
+                    valid_standards = df[df['Target'].notnull()]
                     
-                    for _, c in all_ccvs.iterrows():
-                        meas = safe_parse(c[el])
+                    for _, s in valid_standards.iterrows():
+                        meas = clean_val(s[el])
                         if meas > 0:
-                            rec = (meas / c['Target']) * 100
-                            if (100 - drift_threshold) <= rec <= (100 + drift_threshold):
-                                ccv_pool.append({'idx': c['Index'], 'f': c['Target']/meas})
+                            recovery = (meas / s['Target']) * 100
+                            # Правило 10% дрейфа [cite: 216]
+                            if (100 - drift_threshold) <= recovery <= (100 + drift_threshold):
+                                ccv_pool.append({'idx': s['Index'], 'f': s['Target']/meas})
                     
                     if not ccv_pool:
-                        res_entry[el], aud_entry[el] = "NO VALID CCV", "FAIL"
+                        res_row[el], aud_row[el] = "NO VALID CCV", "FAIL"
                         continue
 
-                    # Determine factor fi using Hybrid Model [cite: 61, 94]
+                    # ГИБКИЙ РАСЧЕТ ФАКТОРА f [cite: 87-97]
                     if len(ccv_pool) == 1:
-                        fi = ccv_pool[0]['f']
+                        f_curr = ccv_pool[0]['f']
                     else:
                         idxs = [c['idx'] for c in ccv_pool]
-                        if curr_idx <= idxs[0]: fi = ccv_pool[0]['f']
-                        elif curr_idx >= idxs[-1]: fi = ccv_pool[-1]['f']
+                        if idx <= idxs[0]: f_curr = ccv_pool[0]['f']
+                        elif idx >= idxs[-1]: f_curr = ccv_pool[-1]['f']
                         else:
+                            # Линейная интерполяция [cite: 190]
                             for n in range(len(idxs)-1):
-                                if idxs[n] <= curr_idx <= idxs[n+1]:
-                                    f_s, f_e = ccv_pool[n]['f'], ccv_pool[n+1]['f']
-                                    fi = f_s + (f_e - f_s) * (curr_idx - idxs[n]) / (idxs[n+1] - idxs[n])
+                                if idxs[n] <= idx <= idxs[n+1]:
+                                    f_start, f_end = ccv_pool[n]['f'], ccv_pool[n+1]['f']
+                                    f_curr = f_start + (f_end - f_start) * (idx - idxs[n]) / (idxs[n+1] - idxs[n])
                                     break
+
+                    # MASTER EQUATION: Drift -> Blank -> Dilution [cite: 205-207]
+                    raw_v = clean_val(row[el])
+                    # 1. Коррекция дрейфа
+                    c_drift = raw_v * f_curr if row['Type'] in ['S', 'BLK', 'MBB'] else raw_v
                     
-                    # 2. MASTER EQUATION WORKFLOW [cite: 205-207, 219-221]
-                    raw_val = safe_parse(row[el])
-                    # Phase A: Drift
-                    c_drift = raw_val * (fi if row['Type'] in ['S', 'BLK', 'MBB'] else 1.0)
-                    
-                    # Phase B: Blank Subtraction
-                    blks = df[df['Type'].isin(['BLK', 'MBB'])]
-                    # Blanks are normalized to initial sensitivity baseline
-                    drift_blks = [safe_parse(b[el]) * ccv_pool[0]['f'] for _, b in blks.iterrows()]
+                    # 2. Вычитание бланка (Бланки тоже корректируются по дрейфу первого стандарта)
+                    all_blks = df[df['Type'].isin(['BLK', 'MBB'])]
+                    drift_blks = [clean_val(b[el]) * ccv_pool[0]['f'] for _, b in all_blks.iterrows()]
                     avg_b = np.mean(drift_blks) if drift_blks else 0.0
                     
+                    # Вычитаем бланк только из проб (S) [cite: 173]
                     c_net = c_drift - (avg_b if row['Type'] == 'S' else 0.0)
                     
-                    # Phase C: Dilution
-                    final_conc = c_net * row['Dilution']
+                    # 3. Разбавление [cite: 168]
+                    final = c_net * row['Dilution']
                     
-                    res_entry[el] = format_output(final_conc, '<' in str(row[el]))
-                    aud_entry[el] = f"f:{fi:.3f}|B:{avg_b:.1e}"
+                    res_row[el] = f"{final:.4e}" if 0 < abs(final) < 1e-6 else f"{final:.9f}"
+                    aud_row[el] = f"f:{f_curr:.3f}|B:{avg_b:.1e}"
 
-                res_rows.append(res_entry)
-                audit_rows.append(aud_entry)
+                res_list.append(res_row)
+                aud_list.append(aud_row)
             
-            st.session_state.final_tables = (pd.DataFrame(res_rows), pd.DataFrame(audit_rows))
-
-    if st.session_state.final_tables:
-        res_df, aud_df = st.session_state.final_tables
-        st.write("### Table 2: Final Results"); st.dataframe(res_df)
-        st.write("### Table 3: Audit Log"); st.dataframe(aud_df)
-        
-        csv_buffer = io.StringIO()
-        res_df.to_csv(csv_buffer, index=False)
-        st.download_button("📥 Download Final Results", csv_buffer.getvalue(), "ElementaQ_v3.csv", "text/csv")
+            st.write("### Table 2: Final Results (Corrected)"); st.dataframe(pd.DataFrame(res_list))
+            st.write("### Table 3: Audit Log"); st.dataframe(pd.DataFrame(aud_list))
