@@ -4,7 +4,15 @@ import numpy as np
 import re
 import io
 
-st.set_page_config(page_title="ElementaQ - Audit Suite v1.6", layout="wide", page_icon="🧪")
+st.set_page_config(page_title="ElementaQ - Final Audit v1.7", layout="wide", page_icon="🧪")
+
+# --- Persistent Sidebar UI (Must be outside any conditional blocks) ---
+st.sidebar.header("Step 1: RSD Control")
+rsd_low = st.sidebar.slider("Yellow Flag (!)", 1.0, 15.0, 6.0)
+rsd_high = st.sidebar.slider("Red Flag (!!)", 1.0, 25.0, 10.0)
+
+st.sidebar.header("Step 2: Metrology")
+match_window = st.sidebar.slider("Match Window (%)", 0, 500, (20, 200))
 
 # --- Core Functions ---
 def parse_metadata(name):
@@ -44,17 +52,12 @@ def calculate_drift_factor(idx, ccv_map, target_val):
             return target_val / interp_res
     return 1.0
 
-# --- Sidebar ---
-st.sidebar.header("Settings")
-rsd_low = st.sidebar.slider("Yellow Flag (!)", 1.0, 15.0, 6.0)
-rsd_high = st.sidebar.slider("Red Flag (!!)", 1.0, 25.0, 10.0)
-
 # --- State Management ---
 if 'ph1_df' not in st.session_state: st.session_state.ph1_df = None
 if 'ph2_results' not in st.session_state: st.session_state.ph2_results = None
 
 st.title("🧪 ElementaQ: Analytical Audit Suite")
-st.write("Selective Correction & Full Export | v1.6")
+st.write("Professional ICP Metrology | v1.7 Stable Sidebar")
 st.markdown("---")
 
 uploaded_file = st.file_uploader("Upload Qtegra CSV File", type="csv")
@@ -105,7 +108,7 @@ if uploaded_file:
                 target_v = ccv_rows['Target'].iloc[0]
                 ccv_map = {idx: safe_float(v.split('!')[0]) for idx, v in zip(ccv_rows['Row_Idx'], ccv_rows[el])}
                 
-                # Drift-corrected average blank
+                # Mean Blank (Drift-Corrected)
                 blanks = [safe_float(r[el].split('!')[0]) * calculate_drift_factor(idx, ccv_map, target_v) 
                           for idx, r in ph1[ph1['Type'] == 'BLK'].iterrows()]
                 avg_b = np.mean(blanks) if blanks else 0.0
@@ -114,37 +117,33 @@ if uploaded_file:
                     val_raw = safe_float(row[el].split('!')[0])
                     stype = str(row['Type']).upper()
                     
-                    # 1. Drift Correction: ONLY S and BLK
-                    d_factor = calculate_drift_factor(i, ccv_map, target_v) if stype in ['S', 'BLK'] else 1.0
+                    # 1. Drift: Only S and BLK
+                    d_f = calculate_drift_factor(i, ccv_map, target_v) if stype in ['S', 'BLK'] else 1.0
                     
-                    # 2. Blank Subtraction: ONLY S and MBB (Not from BLK itself!)
-                    sub_val = avg_b if stype in ['S', 'MBB'] else 0.0
+                    # 2. Blank: Only S and MBB (Not from BLK)
+                    sub_v = avg_b if stype in ['S', 'MBB'] else 0.0
                     
-                    final_v = (val_raw * d_factor - sub_val) * row['Dilution']
+                    final_v = (val_raw * d_f - sub_v) * row['Dilution']
                     ph2_df.at[i, el] = format_value(final_v, '<' in str(row[el]))
-                    audit_df.at[i, el] = f"D:{d_factor:.3f}|B:{sub_val:.1e}|x{row['Dilution']}"
+                    audit_df.at[i, el] = f"D:{d_f:.3f}|B:{sub_v:.1e}|x{row['Dilution']}"
 
             st.session_state.ph2_results = (ph2_df, audit_df)
 
     if st.session_state.ph2_results:
         res, log = st.session_state.ph2_results
-        st.write("### 🔵 TABLE 02: Final Results")
+        st.write("### 🔵 TABLE 02: Metrologically Corrected Results")
         st.dataframe(res.drop(columns=['Target', 'Dilution', 'Row_Idx']))
         st.write("### 📜 TABLE 03: Calculation Audit Trail")
         st.dataframe(log.drop(columns=['Target', 'Dilution', 'Row_Idx']))
 
-        # Complete Multi-Table Report Generation
+        # CSV Export
         out = io.StringIO()
-        out.write("ELEMENTAQ v1.6 COMPREHENSIVE REPORT\n")
-        out.write("="*40 + "\n\n")
-        
-        out.write("PHASE 1: RSD STABILITY (INPUT DATA)\n")
+        out.write("ELEMENTAQ v1.7 FULL REPORT\n" + "="*30 + "\n\n")
+        out.write("PHASE 1: INPUT & RSD\n")
         st.session_state.ph1_df.to_csv(out, index=False)
-        
-        out.write("\n\nPHASE 2: METROLOGICALLY CORRECTED RESULTS\n")
+        out.write("\n\nPHASE 2: CORRECTED RESULTS\n")
         res.drop(columns=['Target', 'Dilution', 'Row_Idx']).to_csv(out, index=False)
-        
-        out.write("\n\nPHASE 3: CALCULATION AUDIT TRAIL\n")
+        out.write("\n\nPHASE 3: AUDIT TRAIL\n")
         log.drop(columns=['Target', 'Dilution', 'Row_Idx']).to_csv(out, index=False)
         
-        st.download_button("📥 DOWNLOAD COMPLETE REPORT (ALL TABLES)", out.getvalue(), "ElementaQ_Full_Report_v16.csv", "text/csv")
+        st.download_button("📥 DOWNLOAD FULL PACKAGE", out.getvalue(), "ElementaQ_Audit_v17.csv", "text/csv")
