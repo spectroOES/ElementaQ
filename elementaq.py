@@ -82,4 +82,35 @@ if file:
                                 ccvs.append({'idx': c['Index'], 'f': c['_tgt'] / meas})
                     
                     f = 1.0
-                    if ccv
+                    if ccvs:
+                        bef = [v for v in ccvs if v['idx'] <= row['Index']]
+                        aft = [v for v in ccvs if v['idx'] > row['Index']]
+                        if bef and aft: # Линейная интерполяция
+                            c1, c2 = bef[-1], aft[0]
+                            f = c1['f'] + (c2['f'] - c1['f']) * (row['Index'] - c1['idx']) / (c2['idx'] - c1['idx'])
+                        elif bef: f = bef[-1]['f']
+                        elif aft: f = aft[0]['f']
+
+                    raw = clean_val(row[el])
+                    is_loq = "<" in str(row[el])
+                    # Финальный расчет: (Raw * f - Blank) * Dilution
+                    if is_loq:
+                        val_fin = raw * row['_dil']
+                    else:
+                        val_fin = max(0.0, (raw * f - (avg_b[el] if row['Type']=='S' else 0.0)) * row['_dil'])
+                    
+                    r2[el] = f"{'<' if is_loq else ''}{val_fin:.8f}".rstrip('0').rstrip('.')
+                    r3[el] = f"f:{f:.4f} B:{avg_b[el]:.1e}"
+                res2.append(r2); res3.append(r3)
+            st.session_state.p2_df, st.session_state.p3_df = pd.DataFrame(res2), pd.DataFrame(res3)
+
+        if 'p2_df' in st.session_state:
+            st.subheader("Таблица 2: Итоговый протокол")
+            st.dataframe(st.session_state.p2_df)
+            st.subheader("Таблица 3: Аудит (Drift Factors)")
+            st.dataframe(st.session_state.p3_df)
+            
+            buf = io.StringIO()
+            buf.write("FINAL RESULTS\n"); st.session_state.p2_df.to_csv(buf, index=False)
+            buf.write("\nAUDIT TRAIL\n"); st.session_state.p3_df.to_csv(buf, index=False)
+            st.download_button("📥 Скачать отчет", buf.getvalue().encode('utf-8-sig'), "ElementaQ_v6.csv", "text/csv")
