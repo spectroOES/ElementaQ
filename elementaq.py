@@ -14,6 +14,19 @@ def parse_metadata(name):
     dilution = float(dilution_match.group(1)) if dilution_match else 1.0
     return target, dilution
 
+def format_value(val, is_lq=False):
+    """Scientific notation for tiny values, 9 decimals for standard analytical range"""
+    if is_lq:
+        prefix = "<"
+        val = max(abs(val), 1e-12)
+    else:
+        prefix = ""
+    
+    if 0 < abs(val) < 1e-6:
+        return f"{prefix}{val:.4e}"
+    else:
+        return f"{prefix}{val:.9f}"
+
 def calculate_drift_factor(idx, ccv_map, target_val):
     indices = sorted(ccv_map.keys())
     if not indices: return 1.0
@@ -46,12 +59,10 @@ uploaded_file = st.file_uploader("Upload Qtegra CSV", type="csv")
 if uploaded_file:
     raw_df = pd.read_csv(uploaded_file)
     raw_df.columns = raw_df.columns.str.strip()
-    
-    # Identify Element columns (usually columns after 'Type')
     elements = [col for col in raw_df.columns if col not in ['Category', 'Label', 'Type']]
     
     # --- PHASE 1: COMPRESSION & RSD FILTERING ---
-    st.write("### Step 1: Stability Analysis (RSD Filtering)")
+    st.write("## 🟢 TABLE 1: Phase 1 (Stability Analysis & RSD Flags)")
     final_phase1 = []
     total_rows = len(raw_df)
     valid_rows = total_rows - (total_rows % 4)
@@ -60,89 +71,77 @@ if uploaded_file:
         block = raw_df.iloc[i : i + 4].copy()
         label = str(block['Label'].iloc[0]).strip()
         stype = str(block['Type'].iloc[0]).strip()
-        
         new_row = {'Label': label, 'Type': stype}
         
         for el in elements:
             try:
                 avg_val = block[block['Category'].str.contains('average', case=False, na=False)][el].values[0]
                 rsd_val = float(block[block['Category'].str.contains('RSD', case=False, na=False)][el].values[0])
+                is_lq = '<LQ' in str(avg_val)
+                clean_avg = float(re.sub(r'[^0-9.eE-]', '', str(avg_val).split('<')[0])) 
                 
-                # Basic cleaning of the string value
-                clean_avg = float(re.sub(r'[^0-9.]', '', str(avg_val))) if '<LQ' not in str(avg_val) else 0.0
-                
-                res = clean_avg
-                if rsd_val > rsd_high: res = f"{clean_avg}!!"
-                elif rsd_val > rsd_low: res = f"{clean_avg}!"
-                
-                if '<LQ' in str(avg_val): res = f"<{clean_avg}"
-                
+                res = format_value(clean_avg, is_lq)
+                if not is_lq:
+                    if rsd_val > rsd_high: res += "!!"
+                    elif rsd_val > rsd_low: res += "!"
                 new_row[el] = res
             except:
-                new_row[el] = 0.0
+                new_row[el] = "0.000000000"
         final_phase1.append(new_row)
     
     ph1_df = pd.DataFrame(final_phase1)
     st.dataframe(ph1_df)
+    
+    # Download Phase 1
+    csv_ph1 = ph1_df.to_csv(index=False).encode('utf-8-sig')
+    st.download_button("📥 DOWNLOAD PHASE 1 (RSD Report)", csv_ph1, "ElementaQ_PH1_Stability_Report.csv", "text/csv")
 
-    # --- PHASE 2: DRIFT, BLANK, DILUTION ---
-    if st.button("Proceed to Phase 2: Metrological Correction"):
-        st.write("### Step 2: Final Metrological Results")
+    st.markdown("---")
+
+    # --- PHASE 2: METROLOGICAL CALCULATION ---
+    if st.button("🚀 Run Phase 2: Apply Drift, Blanks & Dilution"):
+        st.write("## 🔵 TABLE 2: Phase 2 (Final Metrological Results)")
         
-        # Parse targets and dilutions from Phase 1 labels
         ph1_df['Target'], ph1_df['Dilution'] = zip(*ph1_df['Label'].map(parse_metadata))
         ph1_df['Row_Idx'] = range(len(ph1_df))
-        
         ph2_df = ph1_df.copy()
         
         for el in elements:
-            # Prepare CCV Drift Map
             ccv_data = ph1_df[ph1_df['Type'] == 'CCV']
             if ccv_data.empty: continue
             
-            # Use numeric conversion for drift mapping
             ccv_map = {}
             for idx, val in zip(ccv_data['Row_Idx'], ccv_data[el]):
-                num_val = float(re.sub(r'[^0-9.]', '', str(val)))
-                ccv_map[idx] = num_val if num_val > 0 else 1.0 # prevent div zero
+                num_val = float(re.sub(r'[^0-9.eE-]', '', str(val).split('!')[0]))
+                ccv_map[idx] = num_val if abs(num_val) > 1e-15 else 1.0
             
             target_val = ph1_df[ph1_df['Type'] == 'CCV']['Target'].iloc[0]
-            
-            # Get Average Blank
-            blanks = ph1_df[ph1_df['Type'] == 'BLK'][el].apply(lambda x: float(re.sub(r'[^0-9.]', '', str(x))))
+            blanks = ph1_df[ph1_df['Type'] == 'BLK'][el].apply(lambda x: float(re.sub(r'[^0-9.eE-]', '', str(x).split('!')[0])))
             avg_blank = blanks.mean() if not blanks.empty else 0.0
             
             for i, row in ph2_df.iterrows():
-                # Extract numeric value for calculation
                 raw_str = str(row[el])
                 is_lq = '<' in raw_str
-                val = float(re.sub(r'[^0-9.]', '', raw_str))
+                val = float(re.sub(r'[^0-9.eE-]', '', raw_str.split('!')[0]))
                 
-                # Concentration Match check
                 is_matched = True
                 if target_val and val > 0:
                     ratio = (val / target_val) * 100
                     if not (match_window[0] <= ratio <= match_window[1]):
                         is_matched = False
                 
-                # Apply Drift
                 f_drift = 1.0
                 if target_val and (is_matched or mismatch_action == "Warn only"):
                     f_drift = calculate_drift_factor(i, ccv_map, target_val)
                 
-                # Final calculation: (Raw * Drift - Blank) * Dilution
                 final_val = (val * f_drift - avg_blank) * row['Dilution']
-                
-                # Formatting
-                res_str = f"{final_val:.4f}"
-                if is_lq: res_str = f"<{final_val:.4f}"
+                res_str = format_value(final_val, is_lq)
                 if not is_matched and not is_lq: res_str += " (!)"
-                
                 ph2_df.at[i, el] = res_str
 
-        st.success("Metrological correction applied.")
-        st.dataframe(ph2_df.drop(columns=['Target', 'Dilution', 'Row_Idx']))
+        final_display = ph2_df.drop(columns=['Target', 'Dilution', 'Row_Idx'])
+        st.dataframe(final_display)
         
-        # Download button for Final Report
-        csv = ph2_df.to_csv(index=False).encode('utf-8')
-        st.download_button("Download Final Report", csv, "ElementaQ_Final_Report.csv", "text/csv")
+        # Download Phase 2
+        csv_ph2 = final_display.to_csv(index=False).encode('utf-8-sig')
+        st.download_button("📥 DOWNLOAD PHASE 2 (Final Metrological Report)", csv_ph2, "ElementaQ_PH2_Final_Corrected.csv", "text/csv")
