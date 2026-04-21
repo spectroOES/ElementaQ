@@ -4,12 +4,11 @@ import numpy as np
 import re
 import io
 
-st.set_page_config(page_title="ElementaQ v5.1", layout="wide")
+st.set_page_config(page_title="ElementaQ v5.2", layout="wide")
 
 # --- INITIALIZE SESSION STATE ---
 if 'p1_df' not in st.session_state: st.session_state.p1_df = None
 if 'p2_df' not in st.session_state: st.session_state.p2_df = None
-if 'p3_df' not in st.session_state: st.session_state.p3_df = None
 
 # --- UTILITIES ---
 def get_val(val):
@@ -24,6 +23,7 @@ def parse_meta(label, r_type):
     d_m = re.search(r'_dil(\d+\.?\d*)$', lb)
     if d_m: dil = float(d_m.group(1))
     if tp in ['ICV', 'CCV']:
+        # Improved target extraction: search for numeric value after underscore
         t_m = re.search(r'_(\d+\.?\d*)(?:_dil\d+)?$', lb)
         if t_m: target = float(t_m.group(1))
     return target, dil
@@ -34,7 +34,7 @@ r_l = st.sidebar.slider("Yellow Flag (!)", 1.0, 15.0, 6.0)
 r_h = st.sidebar.slider("Red Flag (!!)", 1.0, 25.0, 10.0)
 inc_t = st.sidebar.slider("Inclusion Threshold (%)", 10, 100, 50)
 
-st.title("🧪 ElementaQ v5.1")
+st.title("🧪 ElementaQ v5.2")
 file = st.file_uploader("Upload Laboratory CSV", type="csv")
 
 if file:
@@ -42,7 +42,7 @@ if file:
     df_raw.columns = df_raw.columns.str.strip()
     elements = [c for c in df_raw.columns if c not in ['Category', 'Label', 'Type']]
 
-    # PHASE 1: CLICK TRIGGERED
+    # --- PHASE 1 ---
     if st.button("📊 Step 1: Run Filter"):
         rows = []
         valid_limit = len(df_raw) - (len(df_raw) % 4)
@@ -53,11 +53,13 @@ if file:
             r = {'Index': (i//4)+1, 'Label': name, 'Type': tp, '_t': tgt, 'Dilution': dil}
             for el in elements:
                 try:
-                    # Indexing: 0=Avg, 1=SD, 2=RSD, 3=MQL
-                    v_avg, v_sd = block[el].iloc[0], float(block[el].iloc[1])
-                    v_rsd, v_mql = float(block[el].iloc[2]), float(block[el].iloc[3])
+                    v_avg = block[el].iloc[0]
+                    v_sd  = float(block[el].iloc[1])
+                    v_rsd = float(block[el].iloc[2])
+                    v_mql = float(block[el].iloc[3])
                     if "<LQ" in str(v_avg) or float(v_avg) < v_mql:
-                        r[el] = f"<{round(abs(v_sd * 10), 4)}"
+                        # QA: Removed rounding here to preserve precision <0.000073651
+                        r[el] = f"<{abs(v_sd * 10)}"
                     else:
                         f = "!!" if v_rsd > r_h else ("!" if v_rsd > r_l else "")
                         r[el] = f"{float(v_avg)}{f}"
@@ -69,7 +71,7 @@ if file:
         st.subheader("Table 1: Primary Filtered")
         st.dataframe(st.session_state.p1_df.drop(columns=['_t']))
 
-        # PHASE 2: CLICK TRIGGERED
+        # --- PHASE 2 ---
         if st.button("🚀 Step 2: Run Metrology"):
             p1 = st.session_state.p1_df.copy()
             res2, res3 = [], []
@@ -81,20 +83,37 @@ if file:
                 for el in elements:
                     val_raw = get_val(row[el])
                     f_drift = 1.0
+                    
+                    # Improved Drift Matching
                     ccvs = p1[(p1['Type'] == 'CCV') & (p1['_t'].notnull())]
                     if not ccvs.empty:
-                        pts = [c for _, c in ccvs.iterrows() if get_val(c[el]) >= (c['_t'] * inc_t / 100)]
+                        # Filter valid standards based on inclusion threshold
+                        pts = []
+                        for _, c in ccvs.iterrows():
+                            meas = get_val(c[el])
+                            if meas >= (c['_t'] * inc_t / 100):
+                                pts.append({'idx': c['Index'], 'f': c['_t']/meas})
+                        
                         if pts:
-                            best = min(pts, key=lambda x: abs(x['Index'] - row['Index']))
-                            f_drift = best['_t'] / get_val(best[el])
+                            # Nearest CCV logic
+                            best = min(pts, key=lambda x: abs(x['idx'] - row['Index']))
+                            f_drift = best['f']
                     
-                    v_net = (val_raw * f_drift) - (avg_b[el] if row['Type'] == 'S' else 0.0)
+                    v_drift = val_raw * f_drift
+                    v_net = v_drift - (avg_b[el] if row['Type'] == 'S' else 0.0)
                     is_loq = "<" in str(row[el])
-                    # Ensure no negative signs
-                    v_final = max(0.0, val_raw * row['Dilution']) if is_loq else max(0.0, v_net * row['Dilution'])
                     
-                    r2[el] = f"{'<' if is_loq else ''}{v_final:.4f}"
-                    r3[el] = f"f:{f_drift:.2f} B:{avg_b[el]:.2e}"
+                    # Final result Calculation
+                    res_val = max(0.0, val_raw * row['Dilution']) if is_loq else max(0.0, v_net * row['Dilution'])
+                    
+                    # Formatting with scientific notation for very small LOQs if needed
+                    if res_val < 0.0001 and res_val > 0:
+                        formatted = f"{res_val:.8f}".rstrip('0').rstrip('.')
+                    else:
+                        formatted = f"{res_val:.4f}"
+                        
+                    r2[el] = f"{'<' if is_loq else ''}{formatted}"
+                    r3[el] = f"f:{f_drift:.4f} B:{avg_b[el]:.2e}"
                 res2.append(r2); res3.append(r3)
             st.session_state.p2_df = pd.DataFrame(res2)
             st.session_state.p3_df = pd.DataFrame(res3)
@@ -105,18 +124,17 @@ if file:
             st.subheader("Table 3: Audit Trail")
             st.dataframe(st.session_state.p3_df)
             
-            # --- CONSOLIDATED REPORT GENERATION (3 TABLES) ---
             output = io.StringIO()
             output.write("TABLE 2: FINAL CALCULATED RESULTS\n")
             st.session_state.p2_df.to_csv(output, index=False)
-            output.write("\n\nTABLE 3: AUDIT TRAIL (DRIFT & BLANKS)\n")
+            output.write("\n\nTABLE 3: AUDIT TRAIL\n")
             st.session_state.p3_df.to_csv(output, index=False)
-            output.write("\n\nTABLE 1: PRIMARY FILTERED DATA\n")
+            output.write("\n\nTABLE 1: PRIMARY DATA\n")
             st.session_state.p1_df.drop(columns=['_t']).to_csv(output, index=False)
             
             st.download_button(
                 label="📥 Download Full Report (3 Tables)",
                 data=output.getvalue().encode('utf-8-sig'),
-                file_name="ElementaQ_Full_Report.csv",
+                file_name="ElementaQ_Report_v5.2.csv",
                 mime="text/csv"
             )
