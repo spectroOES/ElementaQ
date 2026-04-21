@@ -5,25 +5,27 @@ import re
 import io
 
 # 1. Page Configuration
-st.set_page_config(page_title="ElementaQ v2.6", layout="wide", page_icon="🧪")
+st.set_page_config(page_title="ElementaQ v2.7", layout="wide", page_icon="🧪")
 
-# 2. FIXED SIDEBAR WIDGETS
-# These are placed outside any logic to ensure they never disappear.
+# 2. FIXED SIDEBAR - ALL 3 SLIDERS ARE HERE NOW
+# They stay visible even if no file is uploaded.
 st.sidebar.header("Global Control Settings")
 rsd_limit = st.sidebar.slider("RSD Threshold (%)", 1.0, 25.0, 10.0)
 drift_threshold = st.sidebar.slider("CCV Drift Limit (%)", 1.0, 20.0, 10.0)
+# Added the 3rd slider as requested
+blank_limit = st.sidebar.slider("Blank Max Threshold (abs)", 0.0, 1.0, 0.05, format="%.3f")
 
 # 3. Core Analytical Functions
 def safe_parse(text):
-    """Handles '<' symbols and non-numeric artifacts."""
+    """Fixes the ValueError from the screenshot"""
     if pd.isna(text) or text == "": return 0.0
+    # Clean up strings like '<0.001' or '1.23!!'
     s = str(text).split('<')[-1].split('!')[0].strip()
     clean = re.sub(r'[^0-9.eE-]', '', s)
     try: return float(clean) if clean else 0.0
     except: return 0.0
 
 def parse_metadata(label):
-    """Extracts Target concentration and Dilution Factor."""
     lb = str(label)
     t = re.search(r'[_.]?(\d+\.?\d*)$', lb)
     d = re.search(r'_dil(\d+\.?\d*)', lb)
@@ -34,13 +36,13 @@ def format_output(v, is_lq=False):
     val = max(abs(v), 1e-12) if is_lq else v
     return f"{prefix}{val:.4e}" if 0 < abs(val) < 1e-6 else f"{prefix}{val:.9f}"
 
-# 4. Persistence Management
+# 4. State Management
 if 'st1_data' not in st.session_state: st.session_state.st1_data = None
 if 'final_tables' not in st.session_state: st.session_state.final_tables = None
 
 # 5. Main Application UI
-st.title("🧪 ElementaQ: Analytical Audit Suite (v2.6)")
-st.caption("PhD-Level Metrology Engine | Fixed Sidebar & Hybrid Drift Logic")
+st.title("🧪 ElementaQ: Analytical Audit Suite (v2.7)")
+st.caption("PhD-Level Metrology | 3 Permanent Sliders | Master Equation Logic")
 
 uploaded_file = st.file_uploader("Upload Qtegra CSV File", type="csv")
 
@@ -52,7 +54,6 @@ if uploaded_file:
     # STEP 1: INDEXING & RSD CHECK
     if st.button("📊 Step 1: Process Structure & RSD"):
         processed = []
-        # Group Qtegra 4-row blocks into a single indexed record
         for i in range(0, len(raw) - (len(raw)%4), 4):
             block = raw.iloc[i:i+4]
             lbl = str(block['Label'].iloc[0]).strip()
@@ -85,7 +86,7 @@ if uploaded_file:
                 aud_entry = {'Index': idx, 'Label': row['Label'], 'Type': row['Type']}
 
                 for el in elements:
-                    # Filter valid CCVs within 10% limit
+                    # Filter valid CCVs (The 10% Rule)
                     ccv_pool = []
                     all_ccvs = p1[(p1['Type'] == 'CCV') & (p1['Target'].notnull())]
                     for _, c in all_ccvs.iterrows():
@@ -99,18 +100,17 @@ if uploaded_file:
                         res_entry[el], aud_entry[el] = "NO VALID CCV", "N/A"
                         continue
 
-                    # Hybrid Drift Model Selection
+                    # Hybrid Model Selection: Point-Correction vs Linear Interpolation
                     if len(ccv_pool) == 1:
-                        # Point-Correction Logic
                         f_i = ccv_pool[0]['target'] / ccv_pool[0]['meas']
                     else:
-                        # Linear Interpolation Logic
                         c_idxs = [c['idx'] for c in ccv_pool]
                         if idx <= c_idxs[0]: 
                             f_i = ccv_pool[0]['target'] / ccv_pool[0]['meas']
                         elif idx >= c_idxs[-1]: 
                             f_i = ccv_pool[-1]['target'] / ccv_pool[-1]['meas']
                         else:
+                            # Linear Interpolation Formula
                             for n in range(len(c_idxs)-1):
                                 if c_idxs[n] <= idx <= c_idxs[n+1]:
                                     f_start = ccv_pool[n]['target'] / ccv_pool[n]['meas']
@@ -118,11 +118,42 @@ if uploaded_file:
                                     f_i = f_start + (f_end - f_start) * (idx - c_idxs[n]) / (c_idxs[n+1] - c_idxs[n])
                                     break
                     
-                    # Calculate Drift-Corrected Blank
+                    # 1. Drift Correction (Multiplicative)
+                    raw_v = safe_parse(row[el])
+                    stype = row['Type']
+                    f_applied = f_i if stype in ['S', 'BLK'] else 1.0
+                    c_drifted = raw_v * f_applied
+
+                    # 2. Blank Subtraction (Additive)
                     blanks = p1[p1['Type'] == 'BLK']
-                    # Blanks are drift-corrected to the start standard for baseline stability
                     drift_blanks = [safe_parse(b[el]) * (ccv_pool[0]['target'] / ccv_pool[0]['meas']) for _, b in blanks.iterrows()]
                     avg_blank = np.mean(drift_blanks) if drift_blanks else 0.0
+                    
+                    b_applied = avg_blank if stype in ['S', 'MBB'] else 0.0
+                    c_net = c_drifted - b_applied
 
-                    # Master Equation Sequence
-                    # 1. Drift Correction -> 2. Blank Subtraction
+                    # 3. Dilution Factor scaling
+                    final_v = c_net * row['Dilution']
+                    
+                    res_entry[el] = format_output(final_v, '<' in str(row[el]))
+                    aud_entry[el] = f"f:{f_applied:.4f}|B:{b_applied:.1e}"
+
+                res_rows.append(res_entry)
+                audit_rows.append(aud_entry)
+            
+            st.session_state.final_tables = (pd.DataFrame(res_rows), pd.DataFrame(audit_rows))
+
+    if st.session_state.final_tables:
+        res_df, aud_df = st.session_state.final_tables
+        st.write("### Table 2: Final Corrected Results")
+        st.dataframe(res_df)
+        st.write("### Table 3: Metrological Audit Log")
+        st.dataframe(aud_df)
+
+        # Export Report with all 3 tables
+        out = io.StringIO()
+        out.write("ELEMENTAQ v2.7 ANALYTICAL REPORT\n" + "="*30 + "\n")
+        out.write("\n1. INPUT DATA\n"); st.session_state.st1_data.to_csv(out, index=False)
+        out.write("\n2. FINAL RESULTS\n"); res_df.to_csv(out, index=False)
+        out.write("\n3. AUDIT TRAIL\n"); aud_df.to_csv(out, index=False)
+        st.download_button("📥 Download Full Report (CSV)", out.getvalue(), "ElementaQ_v27_Report.csv", "text/csv")
