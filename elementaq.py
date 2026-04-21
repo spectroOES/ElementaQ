@@ -4,11 +4,12 @@ import numpy as np
 import re
 import io
 
-st.set_page_config(page_title="ElementaQ v5.0", layout="wide")
+st.set_page_config(page_title="ElementaQ v5.1", layout="wide")
 
-# --- INITIALIZE STATE ---
-if 'p1_done' not in st.session_state: st.session_state.p1_done = False
-if 'p2_done' not in st.session_state: st.session_state.p2_done = False
+# --- INITIALIZE SESSION STATE ---
+if 'p1_df' not in st.session_state: st.session_state.p1_df = None
+if 'p2_df' not in st.session_state: st.session_state.p2_df = None
+if 'p3_df' not in st.session_state: st.session_state.p3_df = None
 
 # --- UTILITIES ---
 def get_val(val):
@@ -32,9 +33,8 @@ st.sidebar.header("Global Parameters")
 r_l = st.sidebar.slider("Yellow Flag (!)", 1.0, 15.0, 6.0)
 r_h = st.sidebar.slider("Red Flag (!!)", 1.0, 25.0, 10.0)
 inc_t = st.sidebar.slider("Inclusion Threshold (%)", 10, 100, 50)
-m_win = st.sidebar.slider("Match Window (%)", 5.0, 500.0, (20.0, 200.0))
 
-st.title("🧪 ElementaQ v5.0")
+st.title("🧪 ElementaQ v5.1")
 file = st.file_uploader("Upload Laboratory CSV", type="csv")
 
 if file:
@@ -42,8 +42,8 @@ if file:
     df_raw.columns = df_raw.columns.str.strip()
     elements = [c for c in df_raw.columns if c not in ['Category', 'Label', 'Type']]
 
-    # PHASE 1 TRIGGER
-    if st.button("📊 Step 1: Filter & Detect LOQ"):
+    # PHASE 1: CLICK TRIGGERED
+    if st.button("📊 Step 1: Run Filter"):
         rows = []
         valid_limit = len(df_raw) - (len(df_raw) % 4)
         for i in range(0, valid_limit, 4):
@@ -51,32 +51,26 @@ if file:
             name, tp = str(block['Label'].iloc[0]).strip(), str(block['Type'].iloc[0]).upper()
             tgt, dil = parse_meta(name, tp)
             r = {'Index': (i//4)+1, 'Label': name, 'Type': tp, '_t': tgt, 'Dilution': dil}
-            
             for el in elements:
                 try:
-                    # Explicit Indexing: 0=Avg, 1=SD, 2=RSD, 3=MQL
-                    v_avg = block[el].iloc[0]
-                    v_sd  = float(block[el].iloc[1])
-                    v_rsd = float(block[el].iloc[2])
-                    v_mql = float(block[el].iloc[3])
-                    
+                    # Indexing: 0=Avg, 1=SD, 2=RSD, 3=MQL
+                    v_avg, v_sd = block[el].iloc[0], float(block[el].iloc[1])
+                    v_rsd, v_mql = float(block[el].iloc[2]), float(block[el].iloc[3])
                     if "<LQ" in str(v_avg) or float(v_avg) < v_mql:
-                        r[el] = f"<{round(abs(v_sd * 10), 4)}" # Guard against negative noise
+                        r[el] = f"<{round(abs(v_sd * 10), 4)}"
                     else:
                         f = "!!" if v_rsd > r_h else ("!" if v_rsd > r_l else "")
                         r[el] = f"{float(v_avg)}{f}"
                 except: r[el] = "n/a"
             rows.append(r)
         st.session_state.p1_df = pd.DataFrame(rows)
-        st.session_state.p1_done = True
-        st.session_state.p2_done = False # Reset subsequent phase
 
-    if st.session_state.p1_done:
+    if st.session_state.p1_df is not None:
         st.subheader("Table 1: Primary Filtered")
         st.dataframe(st.session_state.p1_df.drop(columns=['_t']))
 
-        # PHASE 2 TRIGGER
-        if st.button("🚀 Step 2: Apply Metrology"):
+        # PHASE 2: CLICK TRIGGERED
+        if st.button("🚀 Step 2: Run Metrology"):
             p1 = st.session_state.p1_df.copy()
             res2, res3 = [], []
             blks = p1[p1['Type'] == 'BLK']
@@ -94,11 +88,9 @@ if file:
                             best = min(pts, key=lambda x: abs(x['Index'] - row['Index']))
                             f_drift = best['_t'] / get_val(best[el])
                     
-                    v_drift = val_raw * f_drift
-                    v_net = v_drift - (avg_b[el] if row['Type'] == 'S' else 0.0)
+                    v_net = (val_raw * f_drift) - (avg_b[el] if row['Type'] == 'S' else 0.0)
                     is_loq = "<" in str(row[el])
-                    
-                    # FINAL CALCULATION: Force non-negative
+                    # Ensure no negative signs
                     v_final = max(0.0, val_raw * row['Dilution']) if is_loq else max(0.0, v_net * row['Dilution'])
                     
                     r2[el] = f"{'<' if is_loq else ''}{v_final:.4f}"
@@ -106,13 +98,25 @@ if file:
                 res2.append(r2); res3.append(r3)
             st.session_state.p2_df = pd.DataFrame(res2)
             st.session_state.p3_df = pd.DataFrame(res3)
-            st.session_state.p2_done = True
 
-        if st.session_state.p2_done:
+        if st.session_state.p2_df is not None:
             st.subheader("Table 2: Final Results")
             st.dataframe(st.session_state.p2_df)
             st.subheader("Table 3: Audit Trail")
             st.dataframe(st.session_state.p3_df)
             
-            report = st.session_state.p2_df.to_csv(index=False).encode('utf-8-sig')
-            st.download_button("📥 Export Report", report, "ElementaQ_Final.csv", "text/csv")
+            # --- CONSOLIDATED REPORT GENERATION (3 TABLES) ---
+            output = io.StringIO()
+            output.write("TABLE 2: FINAL CALCULATED RESULTS\n")
+            st.session_state.p2_df.to_csv(output, index=False)
+            output.write("\n\nTABLE 3: AUDIT TRAIL (DRIFT & BLANKS)\n")
+            st.session_state.p3_df.to_csv(output, index=False)
+            output.write("\n\nTABLE 1: PRIMARY FILTERED DATA\n")
+            st.session_state.p1_df.drop(columns=['_t']).to_csv(output, index=False)
+            
+            st.download_button(
+                label="📥 Download Full Report (3 Tables)",
+                data=output.getvalue().encode('utf-8-sig'),
+                file_name="ElementaQ_Full_Report.csv",
+                mime="text/csv"
+            )
