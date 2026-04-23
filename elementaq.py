@@ -2,11 +2,10 @@ import streamlit as st
 import pandas as pd
 import re
 
-# --- 1. КОНФИГУРАЦИЯ И ИНТЕРФЕЙС (Всегда наверху) ---
+# --- 1. ИНТЕРФЕЙС И НАСТРОЙКИ ---
 st.set_page_config(page_title="ElementaQ", layout="wide")
 st.title("🧪 ElementaQ: Trace Analysis Engine")
 
-# Сайдбар с настройками (Бегунки теперь "бессмертные")
 st.sidebar.header("⚙️ Methodology Settings")
 rsd_limit_low = st.sidebar.slider("Yellow Flag (!) RSD %", 1.0, 15.0, 6.0, 0.5)
 rsd_limit_high = st.sidebar.slider("Red Flag (!!) RSD %", 5.0, 30.0, 10.0, 0.5)
@@ -15,32 +14,28 @@ st.sidebar.markdown("---")
 ccv_deadband = st.sidebar.number_input("No correction if drift < (%)", 0.0, 5.0, 5.0)
 ccv_max_limit = st.sidebar.number_input("Fail CCV if drift > (%)", 5.0, 30.0, 20.0)
 
-# --- 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+# --- 2. ФУНКЦИИ ---
 def clean_numeric(val):
     if pd.isna(val): return 0.0
     if isinstance(val, str):
-        # Убираем флаги <LQ, !!, ! и оставляем только число
         val = re.sub(r'[^\d\.]', '', val.split('<')[0])
     try: return float(val)
     except: return 0.0
 
 def extract_target_from_type(type_val):
-    """Ищет число после подчеркивания только в колонке Type (напр. CCV_0.1 -> 0.1)"""
+    """Цель берется только из колонки Type после подчеркивания"""
     match = re.search(r'_([\d\.]+)$', str(type_val))
     return float(match.group(1)) if match else None
 
-# --- 3. ЗАГРУЗКА ФАЙЛА ---
+# --- 3. ОБРАБОТКА ---
 uploaded_file = st.file_uploader("Upload ICP-OES CSV", type="csv")
 
 if uploaded_file:
     df_raw = pd.read_csv(uploaded_file)
     element_cols = [col for col in df_raw.columns if col not in ['Category', 'Label', 'Type']]
     
-    # Кнопка запуска
-    run_calc = st.button("🚀 Run Analysis")
-
-    if run_calc:
-        # ЭТАП 1: Table 1 (Сырые данные)
+    if st.button("🚀 Run Analysis"):
+        # Шаг 1: Сбор данных
         processed_s1 = []
         for i in range(0, len(df_raw), 4):
             if i + 3 >= len(df_raw): break
@@ -53,7 +48,7 @@ if uploaded_file:
             processed_s1.append(new_row)
         df_s1 = pd.DataFrame(processed_s1)
 
-        # ЭТАП 2: Расчет бланков
+        # Шаг 2: Расчет среднего BLK
         blank_rows = df_s1[df_s1['Type'] == 'BLK']
         avg_blanks = {el: blank_rows[el].mean() if not blank_rows.empty else 0.0 for el in element_cols}
         
@@ -65,19 +60,16 @@ if uploaded_file:
             row_type = str(row['Type'])
             label = str(row['Label'])
             
-            # А) Обновление дрейфа по колонке TYPE
+            # Обновление дрейфа по Type
             target = extract_target_from_type(row_type)
             if "CCV" in row_type and target:
                 for el in element_cols:
                     measured = row[el]
                     if measured > 0:
                         err = abs((measured - target) / target) * 100
-                        if err > ccv_deadband and err <= ccv_max_limit:
-                            drift_factors[el] = target / measured
-                        else:
-                            drift_factors[el] = 1.0
+                        drift_factors[el] = target / measured if (err > ccv_deadband and err <= ccv_max_limit) else 1.0
 
-            # Б) Расчет значений
+            # Логика разбавления
             dil_match = re.search(r'_dil(\d+)', label)
             df_val = float(dil_match.group(1)) if dil_match else 1.0
             
@@ -87,35 +79,33 @@ if uploaded_file:
             for el in element_cols:
                 raw_val = row[el]
                 f = drift_factors[el]
-                # Бланк НЕ вычитается из самого бланка
-                blk = avg_blanks.get(el, 0) if row_type != 'BLK' else 0.0
+                
+                # --- ИСПРАВЛЕННАЯ ЛОГИКА ВЫЧИТАНИЯ ---
+                # Бланк вычитается ТОЛЬКО из проб (S).
+                # Из MBB, BLK и CCV вычитание бланка ЗАПРЕЩЕНО (blk = 0).
+                blk = avg_blanks.get(el, 0) if row_type == 'S' else 0.0
                 
                 net_val = (raw_val * f) - blk
                 final_res = round(max(0, net_val) * df_val, 4)
                 t2_row[el] = final_res
                 
-                # Формула для Табл 3
+                # Формула для Table 3
                 f_txt = f"{f:.2f}" if f != 1.0 else "1"
                 t3_row[el] = f"({raw_val}*{f_txt}-{blk:.3f})*{int(df_val)}"
 
             table2_data.append(t2_row)
-            
-            # В) В Таблицу 3 берем только S, MBB, BLK
             if row_type in ['S', 'MBB', 'BLK']:
                 table3_data.append(t3_row)
 
-        st.session_state['s1'] = df_s1
-        st.session_state['s2'] = pd.DataFrame(table2_data)
-        st.session_state['s3'] = pd.DataFrame(table3_data)
+        st.session_state['results'] = (df_s1, pd.DataFrame(table2_data), pd.DataFrame(table3_data))
 
-    # --- ОТОБРАЖЕНИЕ РЕЗУЛЬТАТОВ (Вне блока if run_calc, чтобы не пропадали) ---
-    if 's1' in st.session_state:
-        st.subheader("1️⃣ Table 1: Raw Instrumental Data")
-        st.dataframe(st.session_state['s1'], use_container_width=True)
-
-        st.subheader("2️⃣ Table 2: Processed Results (Full Sequence)")
-        st.dataframe(st.session_state['s2'], use_container_width=True)
-
-        st.subheader("3️⃣ Table 3: Audit Trail (Calculations for S, MBB, BLK)")
-        st.info("Formula: (Measured * Drift_Factor - Blank) * Dilution")
-        st.dataframe(st.session_state['s3'], use_container_width=True)
+    # --- 4. ВЫВОД ---
+    if 'results' in st.session_state:
+        s1, s2, s3 = st.session_state['results']
+        st.subheader("1️⃣ Instrumental Raw Data")
+        st.dataframe(s1, use_container_width=True)
+        st.subheader("2️⃣ Final Results (All Rows)")
+        st.dataframe(s2, use_container_width=True)
+        st.subheader("3️⃣ Audit Trail (S, MBB, BLK Only)")
+        st.info("Note: Blank subtraction is strictly applied ONLY to 'S' type rows.")
+        st.dataframe(s3, use_container_width=True)
