@@ -5,8 +5,8 @@ import re
 from io import BytesIO
 
 # --- 1. SETTINGS & UI ---
-st.set_page_config(layout="wide", page_title="Rosen ICP Processor")
-st.title("🔬 ICP-OES Analytical Engine v13.0")
+st.set_page_config(layout="wide", page_title="ElementaQ")
+st.title("🔬 ElementaQ: ICP-OES Analytical Engine v13.0")
 
 if 'results' not in st.session_state:
     st.session_state.results = None
@@ -64,9 +64,8 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
             })
         except: continue
 
-    # PHASE 1: LINEAR DRIFT INTERPOLATION
+    # PHASE 1: LINEAR DRIFT INTERPOLATION (По позиции в автосамплере)
     for el in elements:
-        # Собираем все валидные CCV для данного элемента
         ccv_points = []
         for b in blocks:
             if 'CCV' in str(b['Type']):
@@ -88,7 +87,6 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
                 b['drift_note'][el] = "Below LOQ"
                 continue
 
-            # Фильтруем CCV, подходящие по концентрации (окно drift_window)
             valid_pts = [p for p in ccv_points if (1 - drift_window/100) * raw_val <= p['target'] <= (1 + drift_window/100) * raw_val]
             
             if not valid_pts:
@@ -98,20 +96,19 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
                 b['f_drift'][el] = valid_pts[0]['f']
                 b['drift_note'][el] = f"Fixed({valid_pts[0]['target']})"
             else:
-                # Ищем "соседей" для интерполяции
                 before = [p for p in valid_pts if p['idx'] <= b['idx']]
                 after = [p for p in valid_pts if p['idx'] > b['idx']]
                 
-                if not before: # Только после
+                if not before: 
                     best = min(after, key=lambda x: x['idx'])
                     b['f_drift'][el], b['drift_note'][el] = best['f'], f"First({best['target']})"
-                elif not after: # Только до
+                elif not after: 
                     best = max(before, key=lambda x: x['idx'])
                     b['f_drift'][el], b['drift_note'][el] = best['f'], f"Last({best['target']})"
-                else: # Интерполяция между двумя
+                else: 
                     p1 = max(before, key=lambda x: x['idx'])
                     p2 = min(after, key=lambda x: x['idx'])
-                    # Линейный расчет по индексу (позиции i)
+                    # Линейная интерполяция дрейфа
                     weight = (b['idx'] - p1['idx']) / (p2['idx'] - p1['idx'])
                     b['f_drift'][el] = p1['f'] + weight * (p2['f'] - p1['f'])
                     b['drift_note'][el] = f"Interp({p1['target']}-{p2['target']})"
@@ -158,25 +155,28 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
 
     st.session_state.results = (pd.DataFrame(t1_r), pd.DataFrame(t2_r), pd.DataFrame(t3_r))
 
-# --- 4. OUTPUT ---
+# --- 4. OUTPUT & EXPORT ---
 if st.session_state.results:
     t1, t2, t3 = st.session_state.results
     
-    # Кнопка скачивания: Все три таблицы с заголовками
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
         t1.to_excel(writer, sheet_name='1_Thresholds', index=False)
         t2.to_excel(writer, sheet_name='2_Final_Results', index=False)
         t3.to_excel(writer, sheet_name='3_Math_Log', index=False)
     
-    st.download_button("📥 Download Full Excel Report", buffer.getvalue(), "ICP_Full_Analysis.xlsx")
+    st.download_button(
+        label="📥 Download ElementaQ Full Report",
+        data=buffer.getvalue(),
+        file_name="ElementaQ_Analysis.xlsx",
+        mime="application/vnd.ms-excel"
+    )
 
-    # Отображение на экране с четкими заголовками
     st.subheader("📊 1. Thresholds & Flags")
     st.dataframe(t1, use_container_width=True)
     
-    st.subheader("✅ 2. Final Results (Diluted & Corrected)")
+    st.subheader("✅ 2. Final Results")
     st.dataframe(t2, use_container_width=True)
     
-    st.subheader("📝 3. Detailed Calculation Log")
+    st.subheader("📝 3. Detailed Math Log")
     st.dataframe(t3, use_container_width=True)
