@@ -1,13 +1,12 @@
 import streamlit as st
 import pandas as pd
 import io
-import re
 
 # --- UI Configuration ---
-st.set_page_config(page_title="ICP-OES Data Processor", page_icon="🧪", layout="wide")
+st.set_page_config(page_title="ElementaQ", page_icon="🧪", layout="wide")
 
-st.title("🧪 ICP-OES Analytical Tool - Phase 1")
-st.subheader("Data Filtering & Matrix LOQ Validation")
+st.title("🧪 ElementaQ")
+st.subheader("ICP-OES Data Processing Utility")
 
 # --- Sidebar: User Defined Thresholds ---
 st.sidebar.header("RSD Threshold Settings")
@@ -26,31 +25,27 @@ rsd_limit_high = st.sidebar.slider(
 uploaded_file = st.file_uploader("Upload source ICP-OES CSV file", type="csv")
 
 if uploaded_file:
-    # Read the file
+    # Read the raw data to show status
     df_raw = pd.read_csv(uploaded_file)
     
-    # Identify element columns (skipping Category, Label, Type)
+    # Identification of element columns
     non_element_cols = ['Category', 'Label', 'Type']
     element_cols = [col for col in df_raw.columns if col not in non_element_cols]
     
-    st.success(f"File uploaded. Detected {len(element_cols)} element/wavelength columns.")
+    st.info(f"File loaded successfully. Found {len(element_cols)} elements for analysis.")
 
-    # --- Calculation Trigger ---
-    if st.button("🚀 RUN CALCULATIONS"):
+    # --- Calculation Trigger (Requirement 1) ---
+    if st.button("🚀 Process Data"):
         processed_data = []
-        mql_instrumental = {} # To store the last MQL row values
+        last_inst_mql = {} 
 
-        # Process in blocks of 4 rows
-        # Assumes rows: Concentration average, Concentration SD, Concentration RSD, MQL
+        # Process in blocks of 4 rows based on the CSV structure
         for i in range(0, len(df_raw), 4):
             if i + 3 >= len(df_raw):
                 break
             
-            # Extract the block
+            # Extract block and clean Category names
             block = df_raw.iloc[i : i + 4].copy()
-            
-            # Map categories to rows for easy access
-            # We strip spaces to avoid matching errors
             block['Category'] = block['Category'].str.strip()
             
             label = str(block['Label'].iloc[0])
@@ -63,10 +58,74 @@ if uploaded_file:
 
             for el in element_cols:
                 try:
-                    # Get values from specific rows in the block
-                    avg_val = block[block['Category'] == "Concentration average"][el].values[0]
-                    sd_val = float(block[block['Category'] == "Concentration SD"][el].values[0])
-                    rsd_val = float(block[block['Category'] == "Concentration RSD"][el].values[0])
-                    inst_mql = float(block[block['Category'] == "MQL"][el].values[0])
+                    # Access values within the 4-row block
+                    avg_series = block[block['Category'] == "Concentration average"][el]
+                    sd_series = block[block['Category'] == "Concentration SD"][el]
+                    rsd_series = block[block['Category'] == "Concentration RSD"][el]
+                    mql_series = block[block['Category'] == "MQL"][el]
+
+                    if avg_series.empty:
+                        continue
+
+                    avg_val = avg_series.values[0]
+                    sd_val = float(sd_series.values[0])
+                    rsd_val = float(rsd_series.values[0])
+                    inst_mql = float(mql_series.values[0])
                     
-                    #
+                    # Update the reference instrumental MQL
+                    last_inst_mql[el] = inst_mql
+
+                    # Matrix MQL Rule: SD * 10
+                    matrix_mql = sd_val * 10
+                    
+                    # Check if value is below detection
+                    is_below = False
+                    if isinstance(avg_val, str) and "<LQ" in avg_val:
+                        is_below = True
+                    else:
+                        num_avg = float(avg_val)
+                        if num_avg < matrix_mql:
+                            is_below = True
+                    
+                    if is_below:
+                        new_row[el] = f"<{round(matrix_mql, 4)}"
+                    else:
+                        # Apply RSD Flag logic from Sidebar sliders
+                        if rsd_val > rsd_limit_high:
+                            new_row[el] = f"{round(num_avg, 4)}!!"
+                        elif rsd_val > rsd_limit_low:
+                            new_row[el] = f"{round(num_avg, 4)}!"
+                        else:
+                            new_row[el] = round(num_avg, 4)
+                            
+                except (ValueError, IndexError):
+                    new_row[el] = "n/a"
+
+            processed_data.append(new_row)
+
+        # Create Final DataFrame
+        res_df = pd.DataFrame(processed_data)
+
+        # Append the Instrumental MQL reference row at the bottom
+        if last_inst_mql:
+            mql_ref_row = {'Label': 'MQL (Instrument)', 'Type': 'REF'}
+            mql_ref_row.update(last_inst_mql)
+            res_df = pd.concat([res_df, pd.DataFrame([mql_ref_row])], ignore_index=True)
+
+        # --- Display Results ---
+        st.divider()
+        st.success("Calculations complete.")
+        st.write("### Table 1: Filtered Results")
+        st.dataframe(res_df, use_container_width=True)
+
+        # --- Download Logic ---
+        output = io.StringIO()
+        res_df.to_csv(output, index=False)
+        csv_bytes = output.getvalue()
+
+        st.download_button(
+            label="📥 Download Results as CSV",
+            data=csv_bytes,
+            file_name="ElementaQ_Filtered_Results.csv",
+            mime="text/csv"
+        )
