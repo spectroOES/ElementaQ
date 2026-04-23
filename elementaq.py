@@ -2,14 +2,12 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import re
-import io
 from io import BytesIO
 
 # --- 1. SETTINGS & UI ---
 st.set_page_config(layout="wide", page_title="Rosen ICP Processor")
-st.title("🔬 ICP-OES Analytical Engine v12.0")
+st.title("🔬 ICP-OES Analytical Engine v13.0")
 
-# Инициализация сессии, чтобы данные не пропадали при нажатии кнопок
 if 'results' not in st.session_state:
     st.session_state.results = None
 
@@ -21,7 +19,7 @@ with st.sidebar:
     st.header("📈 Drift Calibration")
     drift_window = st.number_input("CCV Match Window (+/- %)", 5.0, 50.0, 20.0)
 
-# --- 2. HELPER FUNCTIONS (Логика без изменений) ---
+# --- 2. HELPER FUNCTIONS ---
 
 def is_below_loq(avg_val, mql_val):
     if pd.isna(avg_val): return True
@@ -46,7 +44,6 @@ def get_target(type_str):
 
 uploaded_file = st.file_uploader("Upload ICP CSV", type="csv")
 
-# Расчет запускается ТОЛЬКО по кнопке
 if uploaded_file and st.button("🚀 Execute Analysis"):
     df = pd.read_csv(uploaded_file)
     df.columns = df.columns.str.strip()
@@ -63,31 +60,61 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
             blocks.append({
                 'idx': i, 'Label': avg['Label'], 'Type': avg['Type'],
                 'avg': avg, 'sd': sd, 'rsd': rsd, 'mql': mql,
-                'f_drift': {}, 'ccv_name': {}
+                'f_drift': {}, 'drift_note': {}
             })
         except: continue
 
-    all_ccvs = [b for b in blocks if 'CCV' in str(b['Type'])]
-
-    # PHASE 1: DRIFT
-    for b in blocks:
-        for el in elements:
-            f, ccv_label = 1.0, "None"
+    # PHASE 1: LINEAR DRIFT INTERPOLATION
+    for el in elements:
+        # Собираем все валидные CCV для данного элемента
+        ccv_points = []
+        for b in blocks:
+            if 'CCV' in str(b['Type']):
+                target = get_target(b['Type'])
+                measured = to_num(b['avg'][el])
+                if target and measured and measured > 0:
+                    ccv_points.append({
+                        'idx': b['idx'],
+                        'f': target / measured,
+                        'target': target
+                    })
+        
+        for b in blocks:
             raw_val = to_num(b['avg'][el])
             mql_val = to_num(b['mql'][el]) or 0.0
-            if raw_val and not is_below_loq(b['avg'][el], mql_val):
-                matches = []
-                for ccv in all_ccvs:
-                    target = get_target(ccv['Type'])
-                    measured = to_num(ccv['avg'][el])
-                    if target and measured and measured > 0:
-                        if (1 - drift_window/100) * raw_val <= target <= (1 + drift_window/100) * raw_val:
-                            matches.append({'f': target / measured, 'dist': abs(ccv['idx'] - b['idx']), 'name': f"CCV_{target}"})
-                if matches:
-                    best = min(matches, key=lambda x: x['dist'])
-                    f, ccv_label = best['f'], best['name']
-            b['f_drift'][el] = f
-            b['ccv_name'][el] = ccv_label
+            
+            if not raw_val or is_below_loq(b['avg'][el], mql_val):
+                b['f_drift'][el] = 1.0
+                b['drift_note'][el] = "Below LOQ"
+                continue
+
+            # Фильтруем CCV, подходящие по концентрации (окно drift_window)
+            valid_pts = [p for p in ccv_points if (1 - drift_window/100) * raw_val <= p['target'] <= (1 + drift_window/100) * raw_val]
+            
+            if not valid_pts:
+                b['f_drift'][el] = 1.0
+                b['drift_note'][el] = "No CCV match"
+            elif len(valid_pts) == 1:
+                b['f_drift'][el] = valid_pts[0]['f']
+                b['drift_note'][el] = f"Fixed({valid_pts[0]['target']})"
+            else:
+                # Ищем "соседей" для интерполяции
+                before = [p for p in valid_pts if p['idx'] <= b['idx']]
+                after = [p for p in valid_pts if p['idx'] > b['idx']]
+                
+                if not before: # Только после
+                    best = min(after, key=lambda x: x['idx'])
+                    b['f_drift'][el], b['drift_note'][el] = best['f'], f"First({best['target']})"
+                elif not after: # Только до
+                    best = max(before, key=lambda x: x['idx'])
+                    b['f_drift'][el], b['drift_note'][el] = best['f'], f"Last({best['target']})"
+                else: # Интерполяция между двумя
+                    p1 = max(before, key=lambda x: x['idx'])
+                    p2 = min(after, key=lambda x: x['idx'])
+                    # Линейный расчет по индексу (позиции i)
+                    weight = (b['idx'] - p1['idx']) / (p2['idx'] - p1['idx'])
+                    b['f_drift'][el] = p1['f'] + weight * (p2['f'] - p1['f'])
+                    b['drift_note'][el] = f"Interp({p1['target']}-{p2['target']})"
 
     # PHASE 2: MEAN BLANK
     avg_blanks = {}
@@ -99,7 +126,7 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
                 if v is not None: vals.append(v * b['f_drift'][el])
         avg_blanks[el] = np.mean(vals) if vals else 0.0
 
-    # PHASE 3: TABLES GENERATION
+    # PHASE 3: TABLES
     t1_r, t2_r, t3_r = [], [], []
     for b in blocks:
         row1 = {'Label': b['Label'], 'Type': b['Type']}
@@ -123,38 +150,33 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
                 if is_below_loq(b['avg'][el], mql_v):
                     row2[el], row3[el] = "N.D.", "Below LOQ"
                 else:
-                    v = to_num(b['avg'][el])
-                    f = b['f_drift'][el]
-                    bl = avg_blanks[el]
-                    res = (v * f - bl) * dil
+                    v = to_num(b['avg'][el]); f = b['f_drift'][el]
+                    bl = avg_blanks[el]; res = (v * f - bl) * dil
                     row2[el] = round(res, 4)
-                    row3[el] = f"({v:.3f} * {f:.3f}[{b['ccv_name'][el]}] - {bl:.3f}[BLK]) * {dil}"
-            t2_r.append(row2)
-            t3_r.append(row3)
+                    row3[el] = f"({v:.3f} * {f:.3f}[{b['drift_note'][el]}] - {bl:.3f}[BLK]) * {dil}"
+            t2_r.append(row2); t3_r.append(row3)
 
-    # Сохраняем в сессию
     st.session_state.results = (pd.DataFrame(t1_r), pd.DataFrame(t2_r), pd.DataFrame(t3_r))
 
-# --- 4. OUTPUT & EXPORT ---
-
+# --- 4. OUTPUT ---
 if st.session_state.results:
     t1, t2, t3 = st.session_state.results
     
-    # Кнопка скачивания Excel со всеми 3 листами
+    # Кнопка скачивания: Все три таблицы с заголовками
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
         t1.to_excel(writer, sheet_name='1_Thresholds', index=False)
         t2.to_excel(writer, sheet_name='2_Final_Results', index=False)
         t3.to_excel(writer, sheet_name='3_Math_Log', index=False)
     
-    st.download_button(
-        label="📥 Download Full Excel Report",
-        data=buffer.getvalue(),
-        file_name="ICP_Analysis_Report.xlsx",
-        mime="application/vnd.ms-excel"
-    )
+    st.download_button("📥 Download Full Excel Report", buffer.getvalue(), "ICP_Full_Analysis.xlsx")
 
-    tab1, tab2, tab3 = st.tabs(["📊 1. Thresholds", "✅ 2. Final Results", "📝 3. Math Log"])
-    with tab1: st.dataframe(t1)
-    with tab2: st.dataframe(t2)
-    with tab3: st.dataframe(t3)
+    # Отображение на экране с четкими заголовками
+    st.subheader("📊 1. Thresholds & Flags")
+    st.dataframe(t1, use_container_width=True)
+    
+    st.subheader("✅ 2. Final Results (Diluted & Corrected)")
+    st.dataframe(t2, use_container_width=True)
+    
+    st.subheader("📝 3. Detailed Calculation Log")
+    st.dataframe(t3, use_container_width=True)
