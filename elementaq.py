@@ -5,9 +5,8 @@ import re
 from io import BytesIO
 
 # --- 1. SETTINGS & UI ---
-# Исправлено: заголовок теперь совпадает с названием проекта
 st.set_page_config(layout="wide", page_title="ElementaQ")
-st.title("🔬 ElementaQ: ICP-OES Analytical Engine v13.4")
+st.title("🔬 ElementaQ: ICP-OES Analytical Engine v13.5")
 
 def reset_all():
     st.session_state.results = None
@@ -38,14 +37,15 @@ def get_drift_factor(measured, nominal, deadband, max_drift):
 def is_below_loq(avg_val, mql_val):
     if pd.isna(avg_val): return True
     s = str(avg_val).strip()
-    if "<" in s: return True # Учитываем уже помеченные
+    if "<" in s: return True 
     try: return float(s) < mql_val
     except: return True
 
 def to_num(val):
     if pd.isna(val): return None
     try:
-        s = str(val).replace('!', '').replace('<', '').strip()
+        # Очистка от спецсимволов для расчетов
+        s = re.sub(r'[!<>]', '', str(val)).strip()
         return float(s)
     except: return None
 
@@ -76,7 +76,7 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
             blocks.append({'idx': i, 'Label': avg['Label'], 'Type': avg['Type'], 'avg': avg, 'sd': sd, 'rsd': rsd, 'mql': mql, 'f_drift': {}, 'drift_note': {}})
         except: continue
 
-    # DRIFT & BLANKS (Логика сохранена)
+    # Расчет дрейфа (только для CCV)
     for el in elements:
         ccv_pts = []
         for b in blocks:
@@ -113,33 +113,34 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
         vals = [to_num(b['avg'][el]) * b['f_drift'][el] for b in blocks if any(x in str(b['Type']).upper() for x in ['BLK', 'MBB']) if to_num(b['avg'][el]) is not None]
         avg_blanks[el] = np.mean(vals) if vals else 0.0
 
-    # ГЕНЕРАЦИЯ ТАБЛИЦ (Синхронизация LOQ)
+    # ГЕНЕРАЦИЯ ТАБЛИЦ
     t1_r, t2_r, t3_r = [], [], []
     for b in blocks:
         r1 = {'Label': b['Label'], 'Type': b['Type']}
-        temp_loq_check = {} # Для синхронизации с T2
+        loq_status = {} 
         
         for el in elements:
             sd_val = to_num(b['sd'][el]) or 0.0
-            loq_str = f"<{round(sd_val * 10, 3)}"
+            loq_val = round(sd_val * 10, 4)
             
             if is_below_loq(b['avg'][el], to_num(b['mql'][el]) or 0.0): 
-                r1[el] = loq_str
-                temp_loq_check[el] = loq_str
+                r1[el] = f"<{loq_val}"
+                loq_status[el] = loq_val
             else:
                 v, r = to_num(b['avg'][el]), to_num(b['rsd'][el]) or 0.0
                 r1[el] = f"{v}{'!!' if r > rsd_h else ('!' if r > rsd_l else '')}"
-                temp_loq_check[el] = None
+                loq_status[el] = None
         t1_r.append(r1)
         
         if str(b['Type']).startswith('S'):
             r2, r3 = {'Label': b['Label']}, {'Label': b['Label']}
             dil = get_target(b['Type']) or 1.0
             for el in elements:
-                # ГЛАВНОЕ ИСПРАВЛЕНИЕ: Если в T1 это LOQ, в T2 пишем строго то же самое
-                if temp_loq_check[el] is not None:
-                    r2[el] = temp_loq_check[el]
-                    r3[el] = "Below LOQ (Reference T1)"
+                if loq_status[el] is not None:
+                    # ЖЕСТКИЙ ЗАПРЕТ: Только разбавление для LOQ
+                    final_loq = round(loq_status[el] * dil, 4)
+                    r2[el] = f"<{final_loq}"
+                    r3[el] = f"LOQ {loq_status[el]} * Dilution {dil} (Drift/Blank ignored)"
                 else:
                     v, f, bl = to_num(b['avg'][el]), b['f_drift'][el], avg_blanks[el]
                     res = (v * f - bl) * dil
@@ -157,9 +158,7 @@ if uploaded_file and st.session_state.results:
         t1.to_excel(writer, sheet_name='ElementaQ_Report', startrow=1, index=False)
         t2.to_excel(writer, sheet_name='ElementaQ_Report', startrow=len(t1)+5, index=False)
         t3.to_excel(writer, sheet_name='ElementaQ_Report', startrow=len(t1)+len(t2)+9, index=False)
-        ws = writer.sheets['ElementaQ_Report']
-        ws.write(0, 0, "TABLE 1: THRESHOLDS"); ws.write(len(t1)+4, 0, "TABLE 2: FINAL RESULTS"); ws.write(len(t1)+len(t2)+8, 0, "TABLE 3: MATH LOG")
-
+    
     st.download_button("📥 Download ElementaQ Report", buffer.getvalue(), "ElementaQ_Report.xlsx")
     st.subheader("📊 1. Thresholds"); st.dataframe(t1, use_container_width=True)
     st.subheader("✅ 2. Final Results"); st.dataframe(t2, use_container_width=True)
