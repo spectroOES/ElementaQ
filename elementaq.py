@@ -10,11 +10,11 @@ st.title("🧪 ElementaQ: Analytical Engine v6.0")
 
 # Виджеты настроек в Sidebar (Бессмертные)
 with st.sidebar:
-    st.header("⚙️ Контроль качества")
+    st.header("⚙️ Quality Control")
     rsd_l = st.slider("Yellow Flag RSD %", 1.0, 15.0, 6.0, key='rsd_l')
     rsd_h = st.slider("Red Flag RSD %", 5.0, 30.0, 10.0, key='rsd_h')
     st.markdown("---")
-    st.header("📈 Лимиты дрейфа")
+    st.header("📈 Drift Limits")
     db = st.number_input("Мертвая зона (%)", 0.0, 10.0, 5.0, key='db')
     ml = st.number_input("Макс. коррекция (%)", 5.0, 50.0, 20.0, key='ml')
 
