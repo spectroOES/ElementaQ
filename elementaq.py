@@ -6,7 +6,7 @@ from io import BytesIO
 
 # --- 1. INTERFACE CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Rosen ICP Processor")
-st.title("🔬 ICP-OES Data Processor")
+st.title("🔬 ElementaQ ")
 
 # Global variables initialization in session state to prevent NameError
 if 't1' not in st.session_state:
