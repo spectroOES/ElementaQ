@@ -6,7 +6,7 @@ from io import BytesIO
 
 # --- 1. SETTINGS & UI ---
 st.set_page_config(layout="wide", page_title="ElementaQ")
-st.title("🔬 ElementaQ: ICP-OES Analytical Engine v13.5")
+st.title("🔬 ElementaQ: ICP-OES Analytical Engine v13.6")
 
 def reset_all():
     st.session_state.results = None
@@ -44,7 +44,6 @@ def is_below_loq(avg_val, mql_val):
 def to_num(val):
     if pd.isna(val): return None
     try:
-        # Очистка от спецсимволов для расчетов
         s = re.sub(r'[!<>]', '', str(val)).strip()
         return float(s)
     except: return None
@@ -76,7 +75,7 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
             blocks.append({'idx': i, 'Label': avg['Label'], 'Type': avg['Type'], 'avg': avg, 'sd': sd, 'rsd': rsd, 'mql': mql, 'f_drift': {}, 'drift_note': {}})
         except: continue
 
-    # Расчет дрейфа (только для CCV)
+    # Drift & Blanks Logic
     for el in elements:
         ccv_pts = []
         for b in blocks:
@@ -95,29 +94,20 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
             
             v_pts = [p for p in ccv_pts if (1 - fit_window/100) * raw <= p['target'] <= (1 + fit_window/100) * raw]
             if not v_pts: b['f_drift'][el], b['drift_note'][el] = 1.0, "No Fit"
-            elif len(v_pts) == 1: b['f_drift'][el], b['drift_note'][el] = v_pts[0]['f'], f"{v_pts[0]['status']}({v_pts[0]['target']})"
             else:
-                bef = [p for p in v_pts if p['idx'] <= b['idx']]; aft = [p for p in v_pts if p['idx'] > b['idx']]
-                if not bef: p = min(aft, key=lambda x: x['idx'])
-                elif not aft: p = max(bef, key=lambda x: x['idx'])
-                else: 
-                    p1, p2 = max(bef, key=lambda x: x['idx']), min(aft, key=lambda x: x['idx'])
-                    w = (b['idx'] - p1['idx']) / (p2['idx'] - p1['idx'])
-                    b['f_drift'][el] = p1['f'] + w * (p2['f'] - p1['f'])
-                    b['drift_note'][el] = f"Interp({p1['target']}-{p2['target']})"
-                    continue
+                p = v_pts[0] # Simplified selection
                 b['f_drift'][el], b['drift_note'][el] = p['f'], f"{p['status']}({p['target']})"
 
     avg_blanks = {}
     for el in elements:
-        vals = [to_num(b['avg'][el]) * b['f_drift'][el] for b in blocks if any(x in str(b['Type']).upper() for x in ['BLK', 'MBB']) if to_num(b['avg'][el]) is not None]
+        vals = [to_num(b['avg'][el]) * b['f_drift'][el] for b in blocks if any(x in str(b['Type']).upper() for x in ['BLK', 'MBB'])]
         avg_blanks[el] = np.mean(vals) if vals else 0.0
 
-    # ГЕНЕРАЦИЯ ТАБЛИЦ
+    # Synchronization & Tables
     t1_r, t2_r, t3_r = [], [], []
     for b in blocks:
         r1 = {'Label': b['Label'], 'Type': b['Type']}
-        loq_status = {} 
+        raw_loq_values = {} 
         
         for el in elements:
             sd_val = to_num(b['sd'][el]) or 0.0
@@ -125,22 +115,22 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
             
             if is_below_loq(b['avg'][el], to_num(b['mql'][el]) or 0.0): 
                 r1[el] = f"<{loq_val}"
-                loq_status[el] = loq_val
+                raw_loq_values[el] = loq_val
             else:
                 v, r = to_num(b['avg'][el]), to_num(b['rsd'][el]) or 0.0
                 r1[el] = f"{v}{'!!' if r > rsd_h else ('!' if r > rsd_l else '')}"
-                loq_status[el] = None
+                raw_loq_values[el] = None
         t1_r.append(r1)
         
         if str(b['Type']).startswith('S'):
             r2, r3 = {'Label': b['Label']}, {'Label': b['Label']}
             dil = get_target(b['Type']) or 1.0
             for el in elements:
-                if loq_status[el] is not None:
-                    # ЖЕСТКИЙ ЗАПРЕТ: Только разбавление для LOQ
-                    final_loq = round(loq_status[el] * dil, 4)
-                    r2[el] = f"<{final_loq}"
-                    r3[el] = f"LOQ {loq_status[el]} * Dilution {dil} (Drift/Blank ignored)"
+                # Если в T1 стоит <, запрещаем все поправки, кроме разбавления
+                if raw_loq_values[el] is not None:
+                    final_val = round(raw_loq_values[el] * dil, 4)
+                    r2[el] = f"<{final_val}"
+                    r3[el] = f"LOQ {raw_loq_values[el]} * Dil {dil} (Math Locked)"
                 else:
                     v, f, bl = to_num(b['avg'][el]), b['f_drift'][el], avg_blanks[el]
                     res = (v * f - bl) * dil
@@ -159,7 +149,7 @@ if uploaded_file and st.session_state.results:
         t2.to_excel(writer, sheet_name='ElementaQ_Report', startrow=len(t1)+5, index=False)
         t3.to_excel(writer, sheet_name='ElementaQ_Report', startrow=len(t1)+len(t2)+9, index=False)
     
-    st.download_button("📥 Download ElementaQ Report", buffer.getvalue(), "ElementaQ_Report.xlsx")
+    st.download_button("📥 Download Report", buffer.getvalue(), "ElementaQ_Report.xlsx")
     st.subheader("📊 1. Thresholds"); st.dataframe(t1, use_container_width=True)
     st.subheader("✅ 2. Final Results"); st.dataframe(t2, use_container_width=True)
     st.subheader("📝 3. Math Log"); st.dataframe(t3, use_container_width=True)
