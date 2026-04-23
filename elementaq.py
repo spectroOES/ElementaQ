@@ -2,38 +2,45 @@ import streamlit as st
 import pandas as pd
 import re
 
-# --- Конфигурация ---
+# --- 1. КОНФИГУРАЦИЯ И ИНТЕРФЕЙС (Всегда наверху) ---
 st.set_page_config(page_title="ElementaQ", layout="wide")
 st.title("🧪 ElementaQ: Trace Analysis Engine")
 
-# --- SIDEBAR ---
+# Сайдбар с настройками (Бегунки теперь "бессмертные")
 st.sidebar.header("⚙️ Methodology Settings")
+rsd_limit_low = st.sidebar.slider("Yellow Flag (!) RSD %", 1.0, 15.0, 6.0, 0.5)
+rsd_limit_high = st.sidebar.slider("Red Flag (!!) RSD %", 5.0, 30.0, 10.0, 0.5)
+
+st.sidebar.markdown("---")
 ccv_deadband = st.sidebar.number_input("No correction if drift < (%)", 0.0, 5.0, 5.0)
 ccv_max_limit = st.sidebar.number_input("Fail CCV if drift > (%)", 5.0, 30.0, 20.0)
 
-# --- Функции ---
+# --- 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def clean_numeric(val):
     if pd.isna(val): return 0.0
     if isinstance(val, str):
-        # Очистка от приборных флагов типа <LQ или !!
-        val = re.sub(r'[^0-9.]', '', val.split('<')[0])
+        # Убираем флаги <LQ, !!, ! и оставляем только число
+        val = re.sub(r'[^\d\.]', '', val.split('<')[0])
     try: return float(val)
     except: return 0.0
 
 def extract_target_from_type(type_val):
-    """Извлекает число после подчеркивания в колонке Type (напр. CCV_0.1 -> 0.1)"""
+    """Ищет число после подчеркивания только в колонке Type (напр. CCV_0.1 -> 0.1)"""
     match = re.search(r'_([\d\.]+)$', str(type_val))
     return float(match.group(1)) if match else None
 
-# --- Загрузка и расчет ---
-uploaded_file = st.file_uploader("Upload CSV", type="csv")
+# --- 3. ЗАГРУЗКА ФАЙЛА ---
+uploaded_file = st.file_uploader("Upload ICP-OES CSV", type="csv")
 
 if uploaded_file:
     df_raw = pd.read_csv(uploaded_file)
     element_cols = [col for col in df_raw.columns if col not in ['Category', 'Label', 'Type']]
     
-    if st.button("🚀 Run Analysis"):
-        # 1. Формирование Table 1 (Базовые средние)
+    # Кнопка запуска
+    run_calc = st.button("🚀 Run Analysis")
+
+    if run_calc:
+        # ЭТАП 1: Table 1 (Сырые данные)
         processed_s1 = []
         for i in range(0, len(df_raw), 4):
             if i + 3 >= len(df_raw): break
@@ -46,19 +53,19 @@ if uploaded_file:
             processed_s1.append(new_row)
         df_s1 = pd.DataFrame(processed_s1)
 
-        # 2. Расчет Бланков
+        # ЭТАП 2: Расчет бланков
         blank_rows = df_s1[df_s1['Type'] == 'BLK']
         avg_blanks = {el: blank_rows[el].mean() if not blank_rows.empty else 0.0 for el in element_cols}
         
-        table2_data = [] # Финальные результаты
-        table3_data = [] # Только S, MBB, BLK
+        table2_data = []
+        table3_data = []
         drift_factors = {el: 1.0 for el in element_cols}
 
         for _, row in df_s1.iterrows():
             row_type = str(row['Type'])
             label = str(row['Label'])
             
-            # А) Если это CCV — обновляем дрейф (СМОТРИМ ТОЛЬКО В TYPE)
+            # А) Обновление дрейфа по колонке TYPE
             target = extract_target_from_type(row_type)
             if "CCV" in row_type and target:
                 for el in element_cols:
@@ -70,46 +77,45 @@ if uploaded_file:
                         else:
                             drift_factors[el] = 1.0
 
-            # Б) Расчет для всех строк (для Table 2)
-            # Извлекаем разбавление из Label (это единственное, что мы берем из Label)
+            # Б) Расчет значений
             dil_match = re.search(r'_dil(\d+)', label)
             df_val = float(dil_match.group(1)) if dil_match else 1.0
             
             t2_row = {'Label': label, 'Type': row_type}
-            t3_row = {'Label': label} # В Табл 3 колонку Type можно не дублировать для экономии места
+            t3_row = {'Label': label}
             
             for el in element_cols:
                 raw_val = row[el]
                 f = drift_factors[el]
-                # Бланк вычитается из всех, кроме самих BLK
+                # Бланк НЕ вычитается из самого бланка
                 blk = avg_blanks.get(el, 0) if row_type != 'BLK' else 0.0
                 
                 net_val = (raw_val * f) - blk
                 final_res = round(max(0, net_val) * df_val, 4)
                 t2_row[el] = final_res
                 
-                # Формула для аудита
+                # Формула для Табл 3
                 f_txt = f"{f:.2f}" if f != 1.0 else "1"
                 t3_row[el] = f"({raw_val}*{f_txt}-{blk:.3f})*{int(df_val)}"
 
             table2_data.append(t2_row)
             
-            # В) В Таблицу 3 добавляем ТОЛЬКО S, MBB, BLK
-            if row_type in ['S', 'MBB', 'BLK'] or '_dil' in label:
+            # В) В Таблицу 3 берем только S, MBB, BLK
+            if row_type in ['S', 'MBB', 'BLK']:
                 table3_data.append(t3_row)
 
-        st.session_state['results'] = (df_s1, pd.DataFrame(table2_data), pd.DataFrame(table3_data))
+        st.session_state['s1'] = df_s1
+        st.session_state['s2'] = pd.DataFrame(table2_data)
+        st.session_state['s3'] = pd.DataFrame(table3_data)
 
-    # --- ОТОБРАЖЕНИЕ ---
-    if 'results' in st.session_state:
-        s1, s2, s3 = st.session_state['results']
-        
-        st.subheader("1️⃣ Table 1: Instrumental Averages")
-        st.dataframe(s1, use_container_width=True)
+    # --- ОТОБРАЖЕНИЕ РЕЗУЛЬТАТОВ (Вне блока if run_calc, чтобы не пропадали) ---
+    if 's1' in st.session_state:
+        st.subheader("1️⃣ Table 1: Raw Instrumental Data")
+        st.dataframe(st.session_state['s1'], use_container_width=True)
 
-        st.subheader("2️⃣ Table 2: Processed Results (All Rows)")
-        st.dataframe(s2, use_container_width=True)
+        st.subheader("2️⃣ Table 2: Processed Results (Full Sequence)")
+        st.dataframe(st.session_state['s2'], use_container_width=True)
 
         st.subheader("3️⃣ Table 3: Audit Trail (Calculations for S, MBB, BLK)")
-        st.info("Formula: (Raw_Signal * Drift_Factor - Blank) * Dilution")
-        st.dataframe(s3, use_container_width=True)
+        st.info("Formula: (Measured * Drift_Factor - Blank) * Dilution")
+        st.dataframe(st.session_state['s3'], use_container_width=True)
