@@ -6,9 +6,8 @@ from io import BytesIO
 
 # --- 1. SETTINGS & UI ---
 st.set_page_config(layout="wide", page_title="ElementaQ")
-st.title("🔬 ElementaQ: ICP-OES Analytical Engine v13.1")
+st.title("🔬 ElementaQ: ICP-OES Analytical Engine v13.2")
 
-# Функция для полной очистки при смене файла
 def reset_all():
     st.session_state.results = None
 
@@ -16,14 +15,32 @@ if 'results' not in st.session_state:
     st.session_state.results = None
 
 with st.sidebar:
-    st.header("⚙️ QC Settings")
-    rsd_l = st.sidebar.slider("Yellow Flag RSD %", 1.0, 15.0, 6.0)
-    rsd_h = st.sidebar.slider("Red Flag RSD %", 1.0, 25.0, 10.0)
+    st.header("⚙️ QC Flags (RSD)")
+    rsd_l = st.sidebar.slider("Yellow Flag %", 1.0, 15.0, 6.0)
+    rsd_h = st.sidebar.slider("Red Flag %", 1.0, 25.0, 10.0)
+    
     st.markdown("---")
-    st.header("📈 Drift Calibration")
-    drift_window = st.number_input("CCV Match Window (+/- %)", 5.0, 50.0, 20.0)
+    st.header("📈 Drift & Calibration")
+    # Виджет 1: Подходит ли стандарт аналиту (Fit)
+    fit_window = st.number_input("CCV Match Window (Fit) +/- %", 5.0, 100.0, 20.0)
+    # Виджет 2: Мертвая зона (ниже которой не корректируем)
+    d_deadband = st.number_input("Drift Deadband %", 0.0, 10.0, 5.0)
+    # Виджет 3: Максимальный дрейф (выше которого QC Fail)
+    d_max = st.number_input("Max Drift Allowed %", 5.0, 50.0, 10.0)
 
-# --- 2. HELPER FUNCTIONS (Логика без изменений) ---
+# --- 2. HELPER FUNCTIONS ---
+
+def get_drift_factor(measured, nominal, deadband, max_drift):
+    """Логика коррекции дрейфа согласно твоим правилам."""
+    if not measured or not nominal: return 1.0, "None"
+    diff = abs((measured - nominal) / nominal) * 100
+    
+    if diff <= deadband:
+        return 1.0, "Stable"
+    elif diff > max_drift:
+        return 1.0, "QC FAIL"
+    else:
+        return nominal / measured, "Corrected"
 
 def is_below_loq(avg_val, mql_val):
     if pd.isna(avg_val): return True
@@ -45,10 +62,8 @@ def get_target(type_str):
 
 # --- 3. PROCESSING ENGINE ---
 
-file_container = st.empty()
-uploaded_file = file_container.file_uploader("Upload ICP CSV", type="csv", on_change=reset_all)
+uploaded_file = st.file_uploader("Upload ICP CSV", type="csv", on_change=reset_all)
 
-# Если файл удален - принудительно зануляем результаты
 if not uploaded_file:
     st.session_state.results = None
 
@@ -68,31 +83,41 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
             blocks.append({'idx': i, 'Label': avg['Label'], 'Type': avg['Type'], 'avg': avg, 'sd': sd, 'rsd': rsd, 'mql': mql, 'f_drift': {}, 'drift_note': {}})
         except: continue
 
-    # DRIFT INTERPOLATION
+    # DRIFT CALCULATION
     for el in elements:
         ccv_pts = []
         for b in blocks:
             if 'CCV' in str(b['Type']):
-                t = get_target(b['Type']); m = to_num(b['avg'][el])
-                if t and m and m > 0: ccv_pts.append({'idx': b['idx'], 'f': t/m, 'target': t})
+                nom = get_target(b['Type'])
+                meas = to_num(b['avg'][el])
+                if nom and meas:
+                    f, note = get_drift_factor(meas, nom, d_deadband, d_max)
+                    ccv_pts.append({'idx': b['idx'], 'f': f, 'target': nom, 'status': note})
         
         for b in blocks:
             raw = to_num(b['avg'][el]); mql_v = to_num(b['mql'][el]) or 0.0
             if not raw or is_below_loq(b['avg'][el], mql_v):
-                b['f_drift'][el] = 1.0; b['drift_note'][el] = "Below LOQ"
+                b['f_drift'][el], b['drift_note'][el] = 1.0, "Below LOQ"
                 continue
-            v_pts = [p for p in ccv_pts if (1 - drift_window/100) * raw <= p['target'] <= (1 + drift_window/100) * raw]
-            if not v_pts: b['f_drift'][el], b['drift_note'][el] = 1.0, "No CCV match"
-            elif len(v_pts) == 1: b['f_drift'][el], b['drift_note'][el] = v_pts[0]['f'], f"Fixed({v_pts[0]['target']})"
+            
+            # Ищем подходящие CCV по Fit Window
+            v_pts = [p for p in ccv_pts if (1 - fit_window/100) * raw <= p['target'] <= (1 + fit_window/100) * raw]
+            
+            if not v_pts: 
+                b['f_drift'][el], b['drift_note'][el] = 1.0, "No Fit"
+            elif len(v_pts) == 1: 
+                b['f_drift'][el], b['drift_note'][el] = v_pts[0]['f'], f"{v_pts[0]['status']}({v_pts[0]['target']})"
             else:
                 bef = [p for p in v_pts if p['idx'] <= b['idx']]; aft = [p for p in v_pts if p['idx'] > b['idx']]
-                if not bef: best = min(aft, key=lambda x: x['idx']); b['f_drift'][el], b['drift_note'][el] = best['f'], f"First({best['target']})"
-                elif not aft: best = max(bef, key=lambda x: x['idx']); b['f_drift'][el], b['drift_note'][el] = best['f'], f"Last({best['target']})"
-                else:
+                if not bef: p = min(aft, key=lambda x: x['idx'])
+                elif not aft: p = max(bef, key=lambda x: x['idx'])
+                else: # Интерполяция
                     p1, p2 = max(bef, key=lambda x: x['idx']), min(aft, key=lambda x: x['idx'])
                     w = (b['idx'] - p1['idx']) / (p2['idx'] - p1['idx'])
                     b['f_drift'][el] = p1['f'] + w * (p2['f'] - p1['f'])
                     b['drift_note'][el] = f"Interp({p1['target']}-{p2['target']})"
+                    continue
+                b['f_drift'][el], b['drift_note'][el] = p['f'], f"{p['status']}({p['target']})"
 
     # BLANKS
     avg_blanks = {}
@@ -107,7 +132,7 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
         for el in elements:
             if is_below_loq(b['avg'][el], to_num(b['mql'][el]) or 0.0): r1[el] = f"<{round((to_num(b['sd'][el]) or 0.0)*10, 3)}"
             else:
-                v = to_num(b['avg'][el]); r = to_num(b['rsd'][el]) or 0.0
+                v, r = to_num(b['avg'][el]), to_num(b['rsd'][el]) or 0.0
                 r1[el] = f"{v}{'!!' if r > rsd_h else ('!' if r > rsd_l else '')}"
         t1_r.append(r1)
         if str(b['Type']).startswith('S'):
@@ -123,33 +148,18 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
 
     st.session_state.results = (pd.DataFrame(t1_r), pd.DataFrame(t2_r), pd.DataFrame(t3_r))
 
-# --- 4. OUTPUT & EXPORT ---
+# --- 4. OUTPUT ---
 if uploaded_file and st.session_state.results:
     t1, t2, t3 = st.session_state.results
-    
-    # Сборка одного файла: таблицы одна под другой
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-        # Пишем всё на один лист "ElementaQ_Report"
         t1.to_excel(writer, sheet_name='ElementaQ_Report', startrow=1, index=False)
-        curr_row = len(t1) + 4
-        
-        t2.to_excel(writer, sheet_name='ElementaQ_Report', startrow=curr_row, index=False)
-        curr_row += len(t2) + 3
-        
-        t3.to_excel(writer, sheet_name='ElementaQ_Report', startrow=curr_row, index=False)
-        
-        # Добавляем заголовки прямо в Excel
+        t2.to_excel(writer, sheet_name='ElementaQ_Report', startrow=len(t1)+5, index=False)
+        t3.to_excel(writer, sheet_name='ElementaQ_Report', startrow=len(t1)+len(t2)+9, index=False)
         ws = writer.sheets['ElementaQ_Report']
-        ws.write(0, 0, "TABLE 1: THRESHOLDS & FLAGS")
-        ws.write(len(t1) + 3, 0, "TABLE 2: FINAL RESULTS")
-        ws.write(len(t1) + len(t2) + 6, 0, "TABLE 3: MATH LOG")
+        ws.write(0, 0, "TABLE 1: THRESHOLDS"); ws.write(len(t1)+4, 0, "TABLE 2: FINAL RESULTS"); ws.write(len(t1)+len(t2)+8, 0, "TABLE 3: MATH LOG")
 
-    st.download_button("📥 Download ElementaQ Full Report", buffer.getvalue(), "ElementaQ_Report.xlsx")
-
-    st.subheader("📊 1. Thresholds")
-    st.dataframe(t1, use_container_width=True)
-    st.subheader("✅ 2. Final Results")
-    st.dataframe(t2, use_container_width=True)
-    st.subheader("📝 3. Math Log")
-    st.dataframe(t3, use_container_width=True)
+    st.download_button("📥 Download ElementaQ Report", buffer.getvalue(), "ElementaQ_Report.xlsx")
+    st.subheader("📊 1. Thresholds"); st.dataframe(t1, use_container_width=True)
+    st.subheader("✅ 2. Final Results"); st.dataframe(t2, use_container_width=True)
+    st.subheader("📝 3. Math Log"); st.dataframe(t3, use_container_width=True)
