@@ -6,10 +6,13 @@ from io import BytesIO
 
 # --- 1. SETTINGS & UI ---
 st.set_page_config(layout="wide", page_title="ElementaQ")
-st.title("🔬 ElementaQ: ICP-OES Analytical Engine v13.0")
+st.title("🔬 ElementaQ: ICP-OES Analytical Engine v13.1")
 
-# Очистка результатов при удалении файла
-def clear_results():
+# Функция для полной очистки при смене файла
+def reset_all():
+    st.session_state.results = None
+
+if 'results' not in st.session_state:
     st.session_state.results = None
 
 with st.sidebar:
@@ -20,18 +23,13 @@ with st.sidebar:
     st.header("📈 Drift Calibration")
     drift_window = st.number_input("CCV Match Window (+/- %)", 5.0, 50.0, 20.0)
 
-# Инициализация состояния
-if 'results' not in st.session_state:
-    st.session_state.results = None
-
-# --- 2. HELPER FUNCTIONS ---
+# --- 2. HELPER FUNCTIONS (Логика без изменений) ---
 
 def is_below_loq(avg_val, mql_val):
     if pd.isna(avg_val): return True
     s = str(avg_val).strip()
     if "<LQ" in s: return True
-    try:
-        return float(s) < mql_val
+    try: return float(s) < mql_val
     except: return True
 
 def to_num(val):
@@ -47,9 +45,13 @@ def get_target(type_str):
 
 # --- 3. PROCESSING ENGINE ---
 
-uploaded_file = st.file_uploader("Upload ICP CSV", type="csv", on_change=clear_results)
+file_container = st.empty()
+uploaded_file = file_container.file_uploader("Upload ICP CSV", type="csv", on_change=reset_all)
 
-# Расчет запускается ТОЛЬКО по нажатию кнопки
+# Если файл удален - принудительно зануляем результаты
+if not uploaded_file:
+    st.session_state.results = None
+
 if uploaded_file and st.button("🚀 Execute Analysis"):
     df = pd.read_csv(uploaded_file)
     df.columns = df.columns.str.strip()
@@ -63,94 +65,61 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
             sd  = sub[sub['Category'].str.contains('SD', case=False)].iloc[0]
             rsd = sub[sub['Category'].str.contains('RSD', case=False)].iloc[0]
             mql = sub[sub['Category'].str.contains('MQL', case=False)].iloc[0]
-            blocks.append({
-                'idx': i, 'Label': avg['Label'], 'Type': avg['Type'],
-                'avg': avg, 'sd': sd, 'rsd': rsd, 'mql': mql,
-                'f_drift': {}, 'drift_note': {}
-            })
+            blocks.append({'idx': i, 'Label': avg['Label'], 'Type': avg['Type'], 'avg': avg, 'sd': sd, 'rsd': rsd, 'mql': mql, 'f_drift': {}, 'drift_note': {}})
         except: continue
 
-    # PHASE 1: LINEAR DRIFT INTERPOLATION
+    # DRIFT INTERPOLATION
     for el in elements:
-        ccv_points = []
+        ccv_pts = []
         for b in blocks:
             if 'CCV' in str(b['Type']):
-                target = get_target(b['Type'])
-                measured = to_num(b['avg'][el])
-                if target and measured and measured > 0:
-                    ccv_points.append({'idx': b['idx'], 'f': target / measured, 'target': target})
+                t = get_target(b['Type']); m = to_num(b['avg'][el])
+                if t and m and m > 0: ccv_pts.append({'idx': b['idx'], 'f': t/m, 'target': t})
         
         for b in blocks:
-            raw_val = to_num(b['avg'][el])
-            mql_val = to_num(b['mql'][el]) or 0.0
-            if not raw_val or is_below_loq(b['avg'][el], mql_val):
-                b['f_drift'][el] = 1.0
-                b['drift_note'][el] = "Below LOQ"
+            raw = to_num(b['avg'][el]); mql_v = to_num(b['mql'][el]) or 0.0
+            if not raw or is_below_loq(b['avg'][el], mql_v):
+                b['f_drift'][el] = 1.0; b['drift_note'][el] = "Below LOQ"
                 continue
-
-            valid_pts = [p for p in ccv_points if (1 - drift_window/100) * raw_val <= p['target'] <= (1 + drift_window/100) * raw_val]
-            
-            if not valid_pts:
-                b['f_drift'][el] = 1.0
-                b['drift_note'][el] = "No CCV match"
-            elif len(valid_pts) == 1:
-                b['f_drift'][el] = valid_pts[0]['f']
-                b['drift_note'][el] = f"Fixed({valid_pts[0]['target']})"
+            v_pts = [p for p in ccv_pts if (1 - drift_window/100) * raw <= p['target'] <= (1 + drift_window/100) * raw]
+            if not v_pts: b['f_drift'][el], b['drift_note'][el] = 1.0, "No CCV match"
+            elif len(v_pts) == 1: b['f_drift'][el], b['drift_note'][el] = v_pts[0]['f'], f"Fixed({v_pts[0]['target']})"
             else:
-                before = [p for p in valid_pts if p['idx'] <= b['idx']]
-                after = [p for p in valid_pts if p['idx'] > b['idx']]
-                if not before: 
-                    best = min(after, key=lambda x: x['idx'])
-                    b['f_drift'][el], b['drift_note'][el] = best['f'], f"First({best['target']})"
-                elif not after: 
-                    best = max(before, key=lambda x: x['idx'])
-                    b['f_drift'][el], b['drift_note'][el] = best['f'], f"Last({best['target']})"
-                else: 
-                    p1 = max(before, key=lambda x: x['idx'])
-                    p2 = min(after, key=lambda x: x['idx'])
-                    weight = (b['idx'] - p1['idx']) / (p2['idx'] - p1['idx'])
-                    b['f_drift'][el] = p1['f'] + weight * (p2['f'] - p1['f'])
+                bef = [p for p in v_pts if p['idx'] <= b['idx']]; aft = [p for p in v_pts if p['idx'] > b['idx']]
+                if not bef: best = min(aft, key=lambda x: x['idx']); b['f_drift'][el], b['drift_note'][el] = best['f'], f"First({best['target']})"
+                elif not aft: best = max(bef, key=lambda x: x['idx']); b['f_drift'][el], b['drift_note'][el] = best['f'], f"Last({best['target']})"
+                else:
+                    p1, p2 = max(bef, key=lambda x: x['idx']), min(aft, key=lambda x: x['idx'])
+                    w = (b['idx'] - p1['idx']) / (p2['idx'] - p1['idx'])
+                    b['f_drift'][el] = p1['f'] + w * (p2['f'] - p1['f'])
                     b['drift_note'][el] = f"Interp({p1['target']}-{p2['target']})"
 
-    # PHASE 2: MEAN BLANK
+    # BLANKS
     avg_blanks = {}
     for el in elements:
-        vals = []
-        for b in blocks:
-            if any(x in str(b['Type']).upper() for x in ['BLK', 'MBB']):
-                v = to_num(b['avg'][el])
-                if v is not None: vals.append(v * b['f_drift'][el])
+        vals = [to_num(b['avg'][el]) * b['f_drift'][el] for b in blocks if any(x in str(b['Type']).upper() for x in ['BLK', 'MBB']) if to_num(b['avg'][el]) is not None]
         avg_blanks[el] = np.mean(vals) if vals else 0.0
 
-    # PHASE 3: TABLES
+    # TABLES
     t1_r, t2_r, t3_r = [], [], []
     for b in blocks:
-        row1 = {'Label': b['Label'], 'Type': b['Type']}
+        r1 = {'Label': b['Label'], 'Type': b['Type']}
         for el in elements:
-            mql_v = to_num(b['mql'][el]) or 0.0
-            if is_below_loq(b['avg'][el], mql_v):
-                sd_v = to_num(b['sd'][el]) or 0.0
-                row1[el] = f"<{round(sd_v * 10, 3)}"
+            if is_below_loq(b['avg'][el], to_num(b['mql'][el]) or 0.0): r1[el] = f"<{round((to_num(b['sd'][el]) or 0.0)*10, 3)}"
             else:
-                val = to_num(b['avg'][el])
-                rsd_v = to_num(b['rsd'][el]) or 0.0
-                flag = "!!" if rsd_v > rsd_h else ("!" if rsd_v > rsd_l else "")
-                row1[el] = f"{val}{flag}"
-        t1_r.append(row1)
-
+                v = to_num(b['avg'][el]); r = to_num(b['rsd'][el]) or 0.0
+                r1[el] = f"{v}{'!!' if r > rsd_h else ('!' if r > rsd_l else '')}"
+        t1_r.append(r1)
         if str(b['Type']).startswith('S'):
-            row2, row3 = {'Label': b['Label']}, {'Label': b['Label']}
+            r2, r3 = {'Label': b['Label']}, {'Label': b['Label']}
             dil = get_target(b['Type']) or 1.0
             for el in elements:
-                mql_v = to_num(b['mql'][el]) or 0.0
-                if is_below_loq(b['avg'][el], mql_v):
-                    row2[el], row3[el] = "N.D.", "Below LOQ"
+                if is_below_loq(b['avg'][el], to_num(b['mql'][el]) or 0.0): r2[el], r3[el] = "N.D.", "Below LOQ"
                 else:
-                    v = to_num(b['avg'][el]); f = b['f_drift'][el]
-                    bl = avg_blanks[el]; res = (v * f - bl) * dil
-                    row2[el] = round(res, 4)
-                    row3[el] = f"({v:.3f} * {f:.3f}[{b['drift_note'][el]}] - {bl:.3f}[BLK]) * {dil}"
-            t2_r.append(row2); t3_r.append(row3)
+                    v, f, bl = to_num(b['avg'][el]), b['f_drift'][el], avg_blanks[el]
+                    r2[el] = round((v * f - bl) * dil, 4)
+                    r3[el] = f"({v:.3f} * {f:.3f}[{b['drift_note'][el]}] - {bl:.3f}[BLK]) * {dil}"
+            t2_r.append(r2); t3_r.append(r3)
 
     st.session_state.results = (pd.DataFrame(t1_r), pd.DataFrame(t2_r), pd.DataFrame(t3_r))
 
@@ -158,24 +127,29 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
 if uploaded_file and st.session_state.results:
     t1, t2, t3 = st.session_state.results
     
+    # Сборка одного файла: таблицы одна под другой
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-        t1.to_excel(writer, sheet_name='1_Thresholds', index=False)
-        t2.to_excel(writer, sheet_name='2_Final_Results', index=False)
-        t3.to_excel(writer, sheet_name='3_Math_Log', index=False)
-    
-    st.download_button(
-        label="📥 Download ElementaQ Full Report",
-        data=buffer.getvalue(),
-        file_name="ElementaQ_Analysis.xlsx",
-        mime="application/vnd.ms-excel"
-    )
+        # Пишем всё на один лист "ElementaQ_Report"
+        t1.to_excel(writer, sheet_name='ElementaQ_Report', startrow=1, index=False)
+        curr_row = len(t1) + 4
+        
+        t2.to_excel(writer, sheet_name='ElementaQ_Report', startrow=curr_row, index=False)
+        curr_row += len(t2) + 3
+        
+        t3.to_excel(writer, sheet_name='ElementaQ_Report', startrow=curr_row, index=False)
+        
+        # Добавляем заголовки прямо в Excel
+        ws = writer.sheets['ElementaQ_Report']
+        ws.write(0, 0, "TABLE 1: THRESHOLDS & FLAGS")
+        ws.write(len(t1) + 3, 0, "TABLE 2: FINAL RESULTS")
+        ws.write(len(t1) + len(t2) + 6, 0, "TABLE 3: MATH LOG")
 
-    st.subheader("📊 1. Thresholds & Flags")
+    st.download_button("📥 Download ElementaQ Full Report", buffer.getvalue(), "ElementaQ_Report.xlsx")
+
+    st.subheader("📊 1. Thresholds")
     st.dataframe(t1, use_container_width=True)
-    
     st.subheader("✅ 2. Final Results")
     st.dataframe(t2, use_container_width=True)
-    
-    st.subheader("📝 3. Detailed Math Log")
+    st.subheader("📝 3. Math Log")
     st.dataframe(t3, use_container_width=True)
