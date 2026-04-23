@@ -1,128 +1,168 @@
-import streamlit as st
 import pandas as pd
-import re
-import io
 import numpy as np
+import streamlit as st
+import re
 
-# --- 1. SETTINGS & UI ---
-st.set_page_config(page_title="ElementaQ Pro", layout="wide")
-st.title("🧪 ElementaQ: Analytical Engine v11.0")
+def extract_target_from_type(type_val):
+    """
+    Extracts numerical value from the 'Type' column (e.g., 'CCV_0.1' -> 0.1).
+    Label is ignored as it is considered an arbitrary name.
+    """
+    # Search for a number following an underscore at the end of the Type string
+    match = re.search(r'_(\d+\.?\d*)$', str(type_val))
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
+    return None
 
-# Permanent Sidebar
-with st.sidebar:
-    st.header("⚙️ QC Settings")
-    rsd_l = st.slider("Yellow Flag RSD %", 1.0, 15.0, 6.0, key='rsd_l')
-    rsd_h = st.slider("Red Flag RSD %", 5.0, 30.0, 10.0, key='rsd_h')
-    st.markdown("---")
-    st.header("📈 Drift Settings")
-    db_val = st.number_input("Deadband (No correction < %)", 0.0, 10.0, 5.0, key='db')
-    max_c = st.number_input("Max Correction (%)", 5.0, 50.0, 20.0, key='mc')
-
-# --- 2. HELPER FUNCTIONS ---
-def to_float(val):
-    if pd.isna(val): return 0.0
-    if isinstance(val, str):
-        val = re.sub(r'[^\d\.]', '', val.split('<')[0])
-    try: return float(val)
-    except: return 0.0
-
-def get_target(t_str):
-    res = re.search(r'_([\d\.]+)$', str(t_str))
-    return float(res.group(1)) if res else None
-
-# --- 3. CORE PROCESSING ---
-file = st.file_uploader("Upload CSV Data", type="csv")
-
-if file:
-    try:
-        df_raw = pd.read_csv(file)
-        # Identify element columns
-        cols = [c for c in df_raw.columns if c not in ['Category', 'Label', 'Type']]
+def process_icp_v3_eng(df, drift_limit, mismatch_limit):
+    # 1. Structural Setup
+    # Element columns are everything following 'Type'
+    meta_cols = ['Category', 'Label', 'Type']
+    element_cols = [c for c in df.columns if c not in meta_cols]
+    
+    # Grouping by 4 rows (1 sample block: Avg, SD, RSD, MQL)
+    blocks = []
+    for i in range(0, len(df), 4):
+        block = df.iloc[i:i+4]
+        if block.empty or len(block) < 4:
+            continue
         
-        if st.button("🚀 Execute Analysis"):
-            # STEP 1: Aggregation by "Concentration average"
-            blocks = []
-            # We iterate through the dataframe and pick rows marked as "Concentration average"
-            avg_rows = df_raw[df_raw['Category'].str.contains("Concentration average", na=False, case=False)]
+        avg_row = block[block['Category'] == 'Concentration average'].iloc[0]
+        sd_row = block[block['Category'] == 'Concentration SD'].iloc[0]
+        rsd_row = block[block['Category'] == 'Concentration RSD'].iloc[0]
+        mql_row = block[block['Category'] == 'MQL'].iloc[0]
+        
+        blocks.append({
+            'index': i,
+            'Label': avg_row['Label'],
+            'Type': avg_row['Type'],
+            'avg': avg_row[element_cols],
+            'sd': sd_row[element_cols],
+            'rsd': rsd_row[element_cols],
+            'mql_inst': mql_row[element_cols]
+        })
+
+    # --- STAGE 1: TABLE 1 (MQL & RSD VALIDATION) ---
+    t1_data = []
+    for b in blocks:
+        row = {'Label': b['Label'], 'Type': b['Type']}
+        for col in element_cols:
+            val = b['avg'][col]
+            mql_m = b['sd'][col] * 10  # Matrix MQL logic
             
-            for _, row in avg_rows.iterrows():
-                data_row = {'Label': str(row['Label']), 'Type': str(row['Type'])}
-                for c in cols:
-                    data_row[c] = to_float(row[c])
-                blocks.append(data_row)
-            
-            if not blocks:
-                st.error("No 'Concentration average' rows found in the Category column!")
+            if pd.isna(val):
+                formatted = "N/A"
+            elif val < mql_m:
+                formatted = f"<{mql_m:.3f}"
             else:
-                df_clean = pd.DataFrame(blocks)
+                flag = "!!" if b['rsd'][col] > 10 else ("!" if b['rsd'][col] > 6 else "")
+                formatted = f"{val:.4f}{flag}"
+            row[col] = formatted
+        t1_data.append(row)
+    table1 = pd.DataFrame(t1_data)
 
-                # STEP 2: Global Drift Factor Calculation (f)
-                global_f = {c: [] for c in cols}
-                for _, row in df_clean.iterrows():
-                    nom = get_target(row['Type'])
-                    # Filter for CCV types with a numeric target
-                    if "CCV" in str(row['Type']) and nom:
-                        for c in cols:
-                            meas = row[c]
-                            if meas > 0:
-                                err = abs((meas - nom) / nom) * 100
-                                if db_val < err <= max_c:
-                                    global_f[c].append(nom / meas)
-                
-                final_f = {c: (np.mean(global_f[c]) if global_f[c] else 1.0) for c in cols}
-
-                # STEP 3: Final Results & Audit Table
-                # Calculate mean BLK per element
-                avg_blk = {c: df_clean[df_clean['Type'] == 'BLK'][c].mean() if not df_clean[df_clean['Type'] == 'BLK'].empty else 0.0 for c in cols}
-                
-                t2_res, t3_res = [], []
-                for _, row in df_clean.iterrows():
-                    rt, lb = str(row['Type']), str(row['Label'])
-                    t2_r, t3_r = {'Label': lb, 'Type': rt}, {'Label': lb}
-                    
-                    # Dilution Check
-                    dil = 1
-                    if '_dil' in lb:
-                        m = re.search(r'_dil(\d+)', lb)
-                        if m: dil = int(m.group(1))
-
-                    for c in cols:
-                        raw, f = row[c], final_f[c]
-                        # Subtract BLK only for Samples (S)
-                        b = avg_blk.get(c, 0) if rt == 'S' else 0.0
-                        
-                        val = round(max(0, (raw * f) - b) * dil, 4)
-                        t2_r[c] = val
-                        
-                        if rt in ['S', 'MBB', 'BLK']:
-                            f_txt = f"{f:.3f}" if f != 1.0 else "1"
-                            t3_r[c] = f"({raw}*{f_txt}-{b:.3f})*{dil}"
-                    
-                    t2_res.append(t2_r)
-                    if rt in ['S', 'MBB', 'BLK']:
-                        t3_res.append(t3_r)
-
-                st.session_state['results'] = (df_clean, pd.DataFrame(t2_res), pd.DataFrame(t3_res), final_f)
-
-    except Exception as e:
-        st.error(f"Error processing file: {e}")
-
-# --- 4. OUTPUT ---
-if 'results' in st.session_state:
-    s1, s2, s3, f_map = st.session_state['results']
+    # --- STAGE 2: CALCULATION (TABLE 2 & LOGS) ---
+    t2_results = []
+    t3_logs = []
     
-    # Excel Generation
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as wr:
-        s1.to_excel(wr, sheet_name='1_RawData', index=False)
-        s2.to_excel(wr, sheet_name='2_FinalResults', index=False)
-        s3.to_excel(wr, sheet_name='3_AuditTrail', index=False)
-    
-    st.download_button("📥 Download Excel Report", output.getvalue(), "ICP_Analysis_Final.xlsx")
+    for col in element_cols:
+        # A) Analytical Blank Calculation
+        # Based on v3.0: average of BLKs where value > Instrument MQL
+        blk_vals = [b['avg'][col] for b in blocks if b['Type'] == 'BLK']
+        # Reference Instrument MQL from the last block for this element
+        inst_mql = blocks[-1]['mql_inst'][col] if blocks else 0.0
+        valid_blks = [v for v in blk_vals if v > inst_mql]
+        avg_blank = np.mean(valid_blks) if valid_blks else 0.0
 
-    tabs = st.tabs(["📊 Raw Data", "✅ Final Results", "🔍 Audit Trail"])
-    with tabs[0]: st.dataframe(s1, use_container_width=True)
-    with tabs[1]: st.dataframe(s2, use_container_width=True)
-    with tabs[2]:
-        st.info(f"Drift Correction applied (f): { {k: round(v,4) for k,v in f_map.items() if v != 1.0} }")
-        st.dataframe(s3, use_container_width=True)
+        # B) Identify CCV/ICV Drift Points
+        ccv_points = []
+        for b in blocks:
+            if any(key in str(b['Type']) for key in ['CCV', 'ICV']):
+                target = extract_target_from_type(b['Type'])
+                measured = b['avg'][col]
+                # Validation window for inclusion: measured must be > 50% of target
+                if target and measured > (target * 0.5):
+                    ccv_points.append({'idx': b['index'], 'f': target/measured, 'target': target})
+
+        # C) Process Samples (S)
+        for b in blocks:
+            if b['Type'] == 'S':
+                val_raw = b['avg'][col]
+                f_drift = 1.0
+                
+                # Linear Interpolation of Drift Factor
+                before = [p for p in ccv_points if p['idx'] <= b['index']]
+                after = [p for p in ccv_points if p['idx'] > b['index']]
+                
+                target_ref = None
+                if before and after:
+                    p1, p2 = before[-1], after[0]
+                    # Interpolation based on sequence position
+                    f_drift = p1['f'] + (p2['f'] - p1['f']) * (b['index'] - p1['idx']) / (p2['idx'] - p1['idx'])
+                    target_ref = p1['target']
+                elif before:
+                    f_drift = before[-1]['f']
+                    target_ref = before[-1]['target']
+
+                # Confidence Window (80-120%): Skip correction if outside range
+                if target_ref:
+                    if not (target_ref * 0.8 <= val_raw <= target_ref * 1.2):
+                        f_drift = 1.0 # Noise shouldn't be corrected by drift
+                
+                # Dilution Factor parsing (S_dilXX)
+                df_factor = 1.0
+                if '_dil' in str(b['Label']):
+                    try:
+                        df_factor = float(str(b['Label']).split('_dil')[-1])
+                    except:
+                        pass
+
+                # Master Equation: (Raw * f - Blank) * DF
+                res = (val_raw * f_drift - avg_blank) * df_factor
+                
+                # Build Row if not exists
+                if not any(d['Label'] == b['Label'] for d in t2_results):
+                    t2_results.append({'Label': b['Label']})
+                    t3_logs.append({'Label': b['Label']})
+                
+                t2_results[-1][col] = f"{max(0, res):.4f}" if res > 0 else "<LOQ"
+                t3_logs[-1][col] = f"({val_raw:.3f}*{f_drift:.2f}-{avg_blank:.3f})*{df_factor}"
+
+    return table1, pd.DataFrame(t2_results), pd.DataFrame(t3_logs)
+
+# --- Streamlit Interface ---
+st.set_page_config(layout="wide", page_title="Rosen Academy ICP Processor")
+st.title("🔬 ICP-OES Processor v3.0")
+
+with st.sidebar:
+    st.header("Settings")
+    drift_val = st.slider("Max Drift Alert (%)", 5, 20, 10)
+    mismatch_val = st.slider("Confidence Window (%)", 10, 50, 20)
+    uploaded_file = st.file_uploader("Upload Instrument CSV", type="csv")
+
+if uploaded_file:
+    # Read and clean
+    raw_df = pd.read_csv(uploaded_file)
+    raw_df = raw_df.dropna(subset=['Category'])
+    
+    # Processing
+    t1, t2, t3 = process_icp_v3_eng(raw_df, drift_val, mismatch_val)
+    
+    # UI Tabs
+    tab1, tab2, tab3 = st.tabs(["Table 1: MQL & RSD", "Table 2: Final Results", "Table 3: Math Audit Log"])
+    
+    with tab1:
+        st.subheader("Raw Data with Matrix Thresholds")
+        st.dataframe(t1)
+    
+    with tab2:
+        st.subheader("Corrected Concentrations (Blank, Drift, Dilution)")
+        st.dataframe(t2)
+        
+    with tab3:
+        st.subheader("Calculation Traceability")
+        st.info("Formula format: (Measured * DriftFactor - Blank) * DilutionFactor")
+        st.dataframe(t3)
