@@ -8,7 +8,8 @@ from io import BytesIO
 st.set_page_config(layout="wide", page_title="ElementaQ")
 st.title("🔬 ElementaQ: ICP-OES Analytical Engine v13.0")
 
-if 'results' not in st.session_state:
+# Очистка результатов при удалении файла
+def clear_results():
     st.session_state.results = None
 
 with st.sidebar:
@@ -18,6 +19,10 @@ with st.sidebar:
     st.markdown("---")
     st.header("📈 Drift Calibration")
     drift_window = st.number_input("CCV Match Window (+/- %)", 5.0, 50.0, 20.0)
+
+# Инициализация состояния
+if 'results' not in st.session_state:
+    st.session_state.results = None
 
 # --- 2. HELPER FUNCTIONS ---
 
@@ -42,8 +47,9 @@ def get_target(type_str):
 
 # --- 3. PROCESSING ENGINE ---
 
-uploaded_file = st.file_uploader("Upload ICP CSV", type="csv")
+uploaded_file = st.file_uploader("Upload ICP CSV", type="csv", on_change=clear_results)
 
+# Расчет запускается ТОЛЬКО по нажатию кнопки
 if uploaded_file and st.button("🚀 Execute Analysis"):
     df = pd.read_csv(uploaded_file)
     df.columns = df.columns.str.strip()
@@ -64,7 +70,7 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
             })
         except: continue
 
-    # PHASE 1: LINEAR DRIFT INTERPOLATION (По позиции в автосамплере)
+    # PHASE 1: LINEAR DRIFT INTERPOLATION
     for el in elements:
         ccv_points = []
         for b in blocks:
@@ -72,16 +78,11 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
                 target = get_target(b['Type'])
                 measured = to_num(b['avg'][el])
                 if target and measured and measured > 0:
-                    ccv_points.append({
-                        'idx': b['idx'],
-                        'f': target / measured,
-                        'target': target
-                    })
+                    ccv_points.append({'idx': b['idx'], 'f': target / measured, 'target': target})
         
         for b in blocks:
             raw_val = to_num(b['avg'][el])
             mql_val = to_num(b['mql'][el]) or 0.0
-            
             if not raw_val or is_below_loq(b['avg'][el], mql_val):
                 b['f_drift'][el] = 1.0
                 b['drift_note'][el] = "Below LOQ"
@@ -98,7 +99,6 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
             else:
                 before = [p for p in valid_pts if p['idx'] <= b['idx']]
                 after = [p for p in valid_pts if p['idx'] > b['idx']]
-                
                 if not before: 
                     best = min(after, key=lambda x: x['idx'])
                     b['f_drift'][el], b['drift_note'][el] = best['f'], f"First({best['target']})"
@@ -108,7 +108,6 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
                 else: 
                     p1 = max(before, key=lambda x: x['idx'])
                     p2 = min(after, key=lambda x: x['idx'])
-                    # Линейная интерполяция дрейфа
                     weight = (b['idx'] - p1['idx']) / (p2['idx'] - p1['idx'])
                     b['f_drift'][el] = p1['f'] + weight * (p2['f'] - p1['f'])
                     b['drift_note'][el] = f"Interp({p1['target']}-{p2['target']})"
@@ -156,7 +155,7 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
     st.session_state.results = (pd.DataFrame(t1_r), pd.DataFrame(t2_r), pd.DataFrame(t3_r))
 
 # --- 4. OUTPUT & EXPORT ---
-if st.session_state.results:
+if uploaded_file and st.session_state.results:
     t1, t2, t3 = st.session_state.results
     
     buffer = BytesIO()
