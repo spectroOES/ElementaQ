@@ -128,4 +128,39 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
                 r1[el] = loq_str
             else:
                 v, r = to_num(b['avg'][el]), to_num(b['rsd'][el]) or 0.0
-                r1[el
+                r1[el] = f"{v}{'!!' if r > rsd_h else ('!' if r > rsd_l else '')}"
+        t1_r.append(r1)
+        
+        if str(b['Type']).startswith('S'):
+            r2, r3 = {'Label': b['Label']}, {'Label': b['Label']}
+            dil = get_target(b['Type']) or 1.0
+            for el in elements:
+                sd_val = to_num(b['sd'][el]) or 0.0
+                loq_str = f"<{round(sd_val * 10, 3)}"
+                
+                if is_below_loq(b['avg'][el], to_num(b['mql'][el]) or 0.0): 
+                    r2[el] = loq_str  # Теперь здесь LOQ вместо "N.D."
+                    r3[el] = "Below LOQ"
+                else:
+                    v, f, bl = to_num(b['avg'][el]), b['f_drift'][el], avg_blanks[el]
+                    r2[el] = round((v * f - bl) * dil, 4)
+                    r3[el] = f"({v:.3f} * {f:.3f}[{b['drift_note'][el]}] - {bl:.3f}[BLK]) * {dil}"
+            t2_r.append(r2); t3_r.append(r3)
+
+    st.session_state.results = (pd.DataFrame(t1_r), pd.DataFrame(t2_r), pd.DataFrame(t3_r))
+
+# --- 4. OUTPUT & EXPORT ---
+if uploaded_file and st.session_state.results:
+    t1, t2, t3 = st.session_state.results
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+        t1.to_excel(writer, sheet_name='ElementaQ_Report', startrow=1, index=False)
+        t2.to_excel(writer, sheet_name='ElementaQ_Report', startrow=len(t1)+5, index=False)
+        t3.to_excel(writer, sheet_name='ElementaQ_Report', startrow=len(t1)+len(t2)+9, index=False)
+        ws = writer.sheets['ElementaQ_Report']
+        ws.write(0, 0, "TABLE 1: THRESHOLDS"); ws.write(len(t1)+4, 0, "TABLE 2: FINAL RESULTS"); ws.write(len(t1)+len(t2)+8, 0, "TABLE 3: MATH LOG")
+
+    st.download_button("📥 Download ElementaQ Report", buffer.getvalue(), "ElementaQ_Report.xlsx")
+    st.subheader("📊 1. Thresholds"); st.dataframe(t1, use_container_width=True)
+    st.subheader("✅ 2. Final Results"); st.dataframe(t2, use_container_width=True)
+    st.subheader("📝 3. Math Log"); st.dataframe(t3, use_container_width=True)
