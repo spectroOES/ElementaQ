@@ -25,26 +25,25 @@ rsd_limit_high = st.sidebar.slider(
 uploaded_file = st.file_uploader("Upload source ICP-OES CSV file", type="csv")
 
 if uploaded_file:
-    # Read the raw data to show status
+    # Read the raw data structure
     df_raw = pd.read_csv(uploaded_file)
     
-    # Identification of element columns
+    # Identification of element columns (Ca 317.933 etc)
     non_element_cols = ['Category', 'Label', 'Type']
     element_cols = [col for col in df_raw.columns if col not in non_element_cols]
     
-    st.info(f"File loaded successfully. Found {len(element_cols)} elements for analysis.")
+    st.success(f"File '{uploaded_file.name}' loaded. Ready to process {len(element_cols)} elements.")
 
-    # --- Calculation Trigger (Requirement 1) ---
-    if st.button("🚀 Process Data"):
+    # --- Calculation Trigger (MANDATORY BUTTON) ---
+    if st.button("🚀 Start Calculations"):
         processed_data = []
         last_inst_mql = {} 
 
-        # Process in blocks of 4 rows based on the CSV structure
+        # Process in blocks of 4 rows (Thermo Standard)
         for i in range(0, len(df_raw), 4):
             if i + 3 >= len(df_raw):
                 break
             
-            # Extract block and clean Category names
             block = df_raw.iloc[i : i + 4].copy()
             block['Category'] = block['Category'].str.strip()
             
@@ -58,7 +57,7 @@ if uploaded_file:
 
             for el in element_cols:
                 try:
-                    # Access values within the 4-row block
+                    # Extract values from the block
                     avg_series = block[block['Category'] == "Concentration average"][el]
                     sd_series = block[block['Category'] == "Concentration SD"][el]
                     rsd_series = block[block['Category'] == "Concentration RSD"][el]
@@ -72,13 +71,12 @@ if uploaded_file:
                     rsd_val = float(rsd_series.values[0])
                     inst_mql = float(mql_series.values[0])
                     
-                    # Update the reference instrumental MQL
                     last_inst_mql[el] = inst_mql
 
-                    # Matrix MQL Rule: SD * 10
+                    # Matrix MQL Logic: SD * 10
                     matrix_mql = sd_val * 10
                     
-                    # Check if value is below detection
+                    # Detection check
                     is_below = False
                     if isinstance(avg_val, str) and "<LQ" in avg_val:
                         is_below = True
@@ -90,7 +88,7 @@ if uploaded_file:
                     if is_below:
                         new_row[el] = f"<{round(matrix_mql, 4)}"
                     else:
-                        # Apply RSD Flag logic from Sidebar sliders
+                        # RSD Flags based on Sidebar Sliders
                         if rsd_val > rsd_limit_high:
                             new_row[el] = f"{round(num_avg, 4)}!!"
                         elif rsd_val > rsd_limit_low:
@@ -103,29 +101,21 @@ if uploaded_file:
 
             processed_data.append(new_row)
 
-        # Create Final DataFrame
+        # Finalize Table 1
         res_df = pd.DataFrame(processed_data)
 
-        # Append the Instrumental MQL reference row at the bottom
+        # Add Instrumental MQL reference row
         if last_inst_mql:
             mql_ref_row = {'Label': 'MQL (Instrument)', 'Type': 'REF'}
             mql_ref_row.update(last_inst_mql)
             res_df = pd.concat([res_df, pd.DataFrame([mql_ref_row])], ignore_index=True)
 
-        # --- Display Results ---
+        # --- Output UI ---
         st.divider()
-        st.success("Calculations complete.")
-        st.write("### Table 1: Filtered Results")
+        st.write("### Table 1: Filtered Results (ElementaQ)")
         st.dataframe(res_df, use_container_width=True)
 
-        # --- Download Logic ---
+        # --- Download Link ---
         output = io.StringIO()
         res_df.to_csv(output, index=False)
-        csv_bytes = output.getvalue()
-
-        st.download_button(
-            label="📥 Download Results as CSV",
-            data=csv_bytes,
-            file_name="ElementaQ_Filtered_Results.csv",
-            mime="text/csv"
-        )
+        csv_data = output.getvalue()
