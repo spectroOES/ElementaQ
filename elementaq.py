@@ -6,7 +6,7 @@ from io import BytesIO
 
 # --- 1. SETTINGS & UI ---
 st.set_page_config(layout="wide", page_title="ElementaQ")
-st.title("🔬 ElementaQ: ICP-OES Analytical Engine v13.2")
+st.title("🔬 ElementaQ: ICP-OES Analytical Engine v13.3")
 
 def reset_all():
     st.session_state.results = None
@@ -21,26 +21,18 @@ with st.sidebar:
     
     st.markdown("---")
     st.header("📈 Drift & Calibration")
-    # Виджет 1: Подходит ли стандарт аналиту (Fit)
     fit_window = st.number_input("CCV Match Window (Fit) +/- %", 5.0, 100.0, 20.0)
-    # Виджет 2: Мертвая зона (ниже которой не корректируем)
     d_deadband = st.number_input("Drift Deadband %", 0.0, 10.0, 5.0)
-    # Виджет 3: Максимальный дрейф (выше которого QC Fail)
     d_max = st.number_input("Max Drift Allowed %", 5.0, 50.0, 10.0)
 
 # --- 2. HELPER FUNCTIONS ---
 
 def get_drift_factor(measured, nominal, deadband, max_drift):
-    """Логика коррекции дрейфа согласно твоим правилам."""
     if not measured or not nominal: return 1.0, "None"
     diff = abs((measured - nominal) / nominal) * 100
-    
-    if diff <= deadband:
-        return 1.0, "Stable"
-    elif diff > max_drift:
-        return 1.0, "QC FAIL"
-    else:
-        return nominal / measured, "Corrected"
+    if diff <= deadband: return 1.0, "Stable"
+    elif diff > max_drift: return 1.0, "QC FAIL"
+    else: return nominal / measured, "Corrected"
 
 def is_below_loq(avg_val, mql_val):
     if pd.isna(avg_val): return True
@@ -100,7 +92,6 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
                 b['f_drift'][el], b['drift_note'][el] = 1.0, "Below LOQ"
                 continue
             
-            # Ищем подходящие CCV по Fit Window
             v_pts = [p for p in ccv_pts if (1 - fit_window/100) * raw <= p['target'] <= (1 + fit_window/100) * raw]
             
             if not v_pts: 
@@ -111,7 +102,7 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
                 bef = [p for p in v_pts if p['idx'] <= b['idx']]; aft = [p for p in v_pts if p['idx'] > b['idx']]
                 if not bef: p = min(aft, key=lambda x: x['idx'])
                 elif not aft: p = max(bef, key=lambda x: x['idx'])
-                else: # Интерполяция
+                else: 
                     p1, p2 = max(bef, key=lambda x: x['idx']), min(aft, key=lambda x: x['idx'])
                     w = (b['idx'] - p1['idx']) / (p2['idx'] - p1['idx'])
                     b['f_drift'][el] = p1['f'] + w * (p2['f'] - p1['f'])
@@ -130,36 +121,11 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
     for b in blocks:
         r1 = {'Label': b['Label'], 'Type': b['Type']}
         for el in elements:
-            if is_below_loq(b['avg'][el], to_num(b['mql'][el]) or 0.0): r1[el] = f"<{round((to_num(b['sd'][el]) or 0.0)*10, 3)}"
+            sd_val = to_num(b['sd'][el]) or 0.0
+            loq_str = f"<{round(sd_val * 10, 3)}"
+            
+            if is_below_loq(b['avg'][el], to_num(b['mql'][el]) or 0.0): 
+                r1[el] = loq_str
             else:
                 v, r = to_num(b['avg'][el]), to_num(b['rsd'][el]) or 0.0
-                r1[el] = f"{v}{'!!' if r > rsd_h else ('!' if r > rsd_l else '')}"
-        t1_r.append(r1)
-        if str(b['Type']).startswith('S'):
-            r2, r3 = {'Label': b['Label']}, {'Label': b['Label']}
-            dil = get_target(b['Type']) or 1.0
-            for el in elements:
-                if is_below_loq(b['avg'][el], to_num(b['mql'][el]) or 0.0): r2[el], r3[el] = "N.D.", "Below LOQ"
-                else:
-                    v, f, bl = to_num(b['avg'][el]), b['f_drift'][el], avg_blanks[el]
-                    r2[el] = round((v * f - bl) * dil, 4)
-                    r3[el] = f"({v:.3f} * {f:.3f}[{b['drift_note'][el]}] - {bl:.3f}[BLK]) * {dil}"
-            t2_r.append(r2); t3_r.append(r3)
-
-    st.session_state.results = (pd.DataFrame(t1_r), pd.DataFrame(t2_r), pd.DataFrame(t3_r))
-
-# --- 4. OUTPUT ---
-if uploaded_file and st.session_state.results:
-    t1, t2, t3 = st.session_state.results
-    buffer = BytesIO()
-    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-        t1.to_excel(writer, sheet_name='ElementaQ_Report', startrow=1, index=False)
-        t2.to_excel(writer, sheet_name='ElementaQ_Report', startrow=len(t1)+5, index=False)
-        t3.to_excel(writer, sheet_name='ElementaQ_Report', startrow=len(t1)+len(t2)+9, index=False)
-        ws = writer.sheets['ElementaQ_Report']
-        ws.write(0, 0, "TABLE 1: THRESHOLDS"); ws.write(len(t1)+4, 0, "TABLE 2: FINAL RESULTS"); ws.write(len(t1)+len(t2)+8, 0, "TABLE 3: MATH LOG")
-
-    st.download_button("📥 Download ElementaQ Report", buffer.getvalue(), "ElementaQ_Report.xlsx")
-    st.subheader("📊 1. Thresholds"); st.dataframe(t1, use_container_width=True)
-    st.subheader("✅ 2. Final Results"); st.dataframe(t2, use_container_width=True)
-    st.subheader("📝 3. Math Log"); st.dataframe(t3, use_container_width=True)
+                r1[el
