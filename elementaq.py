@@ -5,8 +5,9 @@ import re
 from io import BytesIO
 
 # --- 1. SETTINGS & UI ---
+# Исправлено: заголовок теперь совпадает с названием проекта
 st.set_page_config(layout="wide", page_title="ElementaQ")
-st.title("🔬 ElementaQ: ICP-OES Analytical Engine v13.3")
+st.title("🔬 ElementaQ: ICP-OES Analytical Engine v13.4")
 
 def reset_all():
     st.session_state.results = None
@@ -37,14 +38,14 @@ def get_drift_factor(measured, nominal, deadband, max_drift):
 def is_below_loq(avg_val, mql_val):
     if pd.isna(avg_val): return True
     s = str(avg_val).strip()
-    if "<LQ" in s: return True
+    if "<" in s: return True # Учитываем уже помеченные
     try: return float(s) < mql_val
     except: return True
 
 def to_num(val):
     if pd.isna(val): return None
     try:
-        s = str(val).replace('!', '').strip()
+        s = str(val).replace('!', '').replace('<', '').strip()
         return float(s)
     except: return None
 
@@ -75,7 +76,7 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
             blocks.append({'idx': i, 'Label': avg['Label'], 'Type': avg['Type'], 'avg': avg, 'sd': sd, 'rsd': rsd, 'mql': mql, 'f_drift': {}, 'drift_note': {}})
         except: continue
 
-    # DRIFT CALCULATION
+    # DRIFT & BLANKS (Логика сохранена)
     for el in elements:
         ccv_pts = []
         for b in blocks:
@@ -93,11 +94,8 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
                 continue
             
             v_pts = [p for p in ccv_pts if (1 - fit_window/100) * raw <= p['target'] <= (1 + fit_window/100) * raw]
-            
-            if not v_pts: 
-                b['f_drift'][el], b['drift_note'][el] = 1.0, "No Fit"
-            elif len(v_pts) == 1: 
-                b['f_drift'][el], b['drift_note'][el] = v_pts[0]['f'], f"{v_pts[0]['status']}({v_pts[0]['target']})"
+            if not v_pts: b['f_drift'][el], b['drift_note'][el] = 1.0, "No Fit"
+            elif len(v_pts) == 1: b['f_drift'][el], b['drift_note'][el] = v_pts[0]['f'], f"{v_pts[0]['status']}({v_pts[0]['target']})"
             else:
                 bef = [p for p in v_pts if p['idx'] <= b['idx']]; aft = [p for p in v_pts if p['idx'] > b['idx']]
                 if not bef: p = min(aft, key=lambda x: x['idx'])
@@ -110,46 +108,48 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
                     continue
                 b['f_drift'][el], b['drift_note'][el] = p['f'], f"{p['status']}({p['target']})"
 
-    # BLANKS
     avg_blanks = {}
     for el in elements:
         vals = [to_num(b['avg'][el]) * b['f_drift'][el] for b in blocks if any(x in str(b['Type']).upper() for x in ['BLK', 'MBB']) if to_num(b['avg'][el]) is not None]
         avg_blanks[el] = np.mean(vals) if vals else 0.0
 
-    # TABLES
+    # ГЕНЕРАЦИЯ ТАБЛИЦ (Синхронизация LOQ)
     t1_r, t2_r, t3_r = [], [], []
     for b in blocks:
         r1 = {'Label': b['Label'], 'Type': b['Type']}
+        temp_loq_check = {} # Для синхронизации с T2
+        
         for el in elements:
             sd_val = to_num(b['sd'][el]) or 0.0
             loq_str = f"<{round(sd_val * 10, 3)}"
             
             if is_below_loq(b['avg'][el], to_num(b['mql'][el]) or 0.0): 
                 r1[el] = loq_str
+                temp_loq_check[el] = loq_str
             else:
                 v, r = to_num(b['avg'][el]), to_num(b['rsd'][el]) or 0.0
                 r1[el] = f"{v}{'!!' if r > rsd_h else ('!' if r > rsd_l else '')}"
+                temp_loq_check[el] = None
         t1_r.append(r1)
         
         if str(b['Type']).startswith('S'):
             r2, r3 = {'Label': b['Label']}, {'Label': b['Label']}
             dil = get_target(b['Type']) or 1.0
             for el in elements:
-                sd_val = to_num(b['sd'][el]) or 0.0
-                loq_str = f"<{round(sd_val * 10, 3)}"
-                
-                if is_below_loq(b['avg'][el], to_num(b['mql'][el]) or 0.0): 
-                    r2[el] = loq_str  # Теперь здесь LOQ вместо "N.D."
-                    r3[el] = "Below LOQ"
+                # ГЛАВНОЕ ИСПРАВЛЕНИЕ: Если в T1 это LOQ, в T2 пишем строго то же самое
+                if temp_loq_check[el] is not None:
+                    r2[el] = temp_loq_check[el]
+                    r3[el] = "Below LOQ (Reference T1)"
                 else:
                     v, f, bl = to_num(b['avg'][el]), b['f_drift'][el], avg_blanks[el]
-                    r2[el] = round((v * f - bl) * dil, 4)
+                    res = (v * f - bl) * dil
+                    r2[el] = round(res, 4)
                     r3[el] = f"({v:.3f} * {f:.3f}[{b['drift_note'][el]}] - {bl:.3f}[BLK]) * {dil}"
             t2_r.append(r2); t3_r.append(r3)
 
     st.session_state.results = (pd.DataFrame(t1_r), pd.DataFrame(t2_r), pd.DataFrame(t3_r))
 
-# --- 4. OUTPUT & EXPORT ---
+# --- 4. OUTPUT ---
 if uploaded_file and st.session_state.results:
     t1, t2, t3 = st.session_state.results
     buffer = BytesIO()
