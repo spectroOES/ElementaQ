@@ -4,164 +4,130 @@ import streamlit as st
 import re
 from io import BytesIO
 
-# --- 1. ИНТЕРФЕЙС (СТРОГО ПО СКРИНШОТУ И НАЧАЛУ ДИАЛОГА) ---
-st.set_page_config(layout="wide", page_title="ICP Processor")
+# --- 1. ИНТЕРФЕЙС (СТРОГО ПО СКРИНШОТУ) ---
+st.set_page_config(layout="wide", page_title="Rosen ICP Processor")
 st.title("🔬 ICP-OES Data Processor")
 
-# Три виджета сверху в ряд
-c1, c2, c3 = st.columns(3)
+c1, c2, c3 = st.columns([2, 1, 1])
 with c1:
     uploaded_file = st.file_uploader("Upload ICP CSV", type="csv")
 with c2:
-    # Кнопка запуска расчета
     process_btn = st.button("🚀 Start Processing", use_container_width=True)
 with c3:
     st.write("**System Status:**")
-    if uploaded_file:
-        st.success("File uploaded")
-    else:
-        st.info("Waiting for file...")
+    st.info("Ready" if uploaded_file else "Waiting...")
 
 st.markdown("---")
 
-# --- 2. ЛОГИКА (ПО ГАЙДУ И АГРИМЕНТУ) ---
+# --- 2. ЯДРО (ПО ГАЙДУ И АГРИМЕНТУ) ---
 
-def extract_target_conc(type_str):
-    """Синтаксис по Агрименту: берем число после последнего подчеркивания"""
+def extract_val(type_str):
+    """Агримент: берем число после последнего подчеркивания"""
     if pd.isna(type_str): return None
     parts = str(type_str).split('_')
-    if len(parts) > 1:
-        try:
-            return float(parts[-1])
-        except ValueError:
-            return None
-    return None
+    try: return float(parts[-1])
+    except: return None
 
-def get_dilution_factor(label):
-    """Поиск коэффициента разбавления в имени образца"""
+def get_df(label):
+    """Разбавление из Label"""
     label = str(label)
     if '/' in label:
         try: return float(label.split('/')[-1])
         except: pass
-    if '_dil' in label:
-        try: return float(label.split('_dil')[-1])
-        except: pass
     return 1.0
 
-def process_analytical_data(df):
+def run_processor(df):
     df.columns = [c.strip() for c in df.columns]
     elements = [c for c in df.columns if c not in ['Category', 'Label', 'Type']]
     
-    # Группировка строк по 4 (avg, sd, rsd, mql)
-    rows_per_sample = 4
+    # Парсим блоки (по 4 строки на образец)
     blocks = []
-    for i in range(0, len(df), rows_per_sample):
-        subset = df.iloc[i:i+rows_per_sample]
-        if len(subset) < 4: continue
-        
-        avg = subset[subset['Category'].str.contains('average', case=False)].iloc[0]
-        sd = subset[subset['Category'].str.contains('SD', case=False)].iloc[0]
-        rsd = subset[subset['Category'].str.contains('RSD', case=False)].iloc[0]
-        
-        blocks.append({
-            'pos': i,
-            'Label': avg['Label'],
-            'Type': avg['Type'],
-            'avg': avg,
-            'sd': sd,
-            'rsd': rsd
-        })
+    for i in range(0, len(df), 4):
+        sub = df.iloc[i:i+4]
+        if len(sub) < 4: continue
+        avg = sub[sub['Category'].str.contains('average', case=False)].iloc[0]
+        sd = sub[sub['Category'].str.contains('SD', case=False)].iloc[0]
+        rsd = sub[sub['Category'].str.contains('RSD', case=False)].iloc[0]
+        blocks.append({'idx': i, 'Label': avg['Label'], 'Type': avg['Type'], 'avg': avg, 'sd': sd, 'rsd': rsd})
 
-    t1_rows, t2_rows, t3_rows = [], [], []
+    t1_list, t2_list, t3_list = [], [], []
+
+    # Предварительно собираем ВСЕ CCV для ускорения поиска
+    all_ccvs = [b for b in blocks if 'CCV' in str(b['Type'])]
 
     for b in blocks:
-        # Таблица 1: Пороги и RSD флаги
-        t1_item = {'Label': b['Label'], 'Type': b['Type']}
+        # T1: Thresholds & RSD
+        t1_r = {'Label': b['Label'], 'Type': b['Type']}
         for el in elements:
             val = pd.to_numeric(b['avg'][el], errors='coerce')
             mql = pd.to_numeric(b['sd'][el], errors='coerce') * 10
             rsd_val = pd.to_numeric(b['rsd'][el], errors='coerce')
-            
-            if pd.isna(val): t1_item[el] = "N/A"
-            elif val < mql: t1_item[el] = f"<{mql:.3f}"
+            if pd.isna(val): t1_r[el] = "N/A"
+            elif val < mql: t1_r[el] = f"<{mql:.3f}"
             else:
-                flag = "!!" if rsd_val > 10 else ("!" if rsd_val > 6 else "")
-                t1_item[el] = f"{val:.4f}{flag}"
-        t1_rows.append(t1_item)
+                f = "!!" if rsd_val > 10 else ("!" if rsd_val > 6 else "")
+                t1_r[el] = f"{val:.4f}{f}"
+        t1_list.append(t1_r)
 
-        # Таблицы 2 и 3: Расчеты только для образцов (S)
+        # T2 & T3: Только для Samples (S)
         if b['Type'] == 'S':
-            t2_item, t3_item = {'Label': b['Label']}, {'Label': b['Label']}
+            t2_r, t3_r = {'Label': b['Label']}, {'Label': b['Label']}
             for el in elements:
                 c_raw = pd.to_numeric(b['avg'][el], errors='coerce')
                 
-                # ЖЕСТКИЙ ПОДБОР CCV (+/- 20%)
+                # Поиск CCV в окне +/- 20%
                 f_drift = 1.0
-                ccv_label = "No Match"
+                used_ccv = "None"
                 
-                suitable_ccvs = []
-                for potential in blocks:
-                    if 'CCV' in str(potential['Type']):
-                        target = extract_target_conc(potential['Type'])
-                        measured = pd.to_numeric(potential['avg'][el], errors='coerce')
-                        
-                        if target and measured > 0:
-                            # Проверка попадания в окно 20%
-                            if (0.8 * c_raw) <= target <= (1.2 * c_raw):
-                                suitable_ccvs.append({
-                                    'f': target / measured,
-                                    'dist': abs(potential['pos'] - b['pos']),
-                                    'target': target
-                                })
+                matches = []
+                for ccv_b in all_ccvs:
+                    target = extract_val(ccv_b['Type'])
+                    measured = pd.to_numeric(ccv_b['avg'][el], errors='coerce')
+                    
+                    if target and measured and measured > 0:
+                        # ПРОВЕРКА: Проба 0.128 подходит к стандарту 0.1? Да (0.08 - 0.15)
+                        if (0.8 * c_raw) <= target <= (1.2 * c_raw):
+                            matches.append({
+                                'f': target / measured, 
+                                'dist': abs(ccv_b['idx'] - b['idx']),
+                                'name': f"CCV_{target}"
+                            })
                 
-                if suitable_ccvs:
-                    # Берем ближайший по времени (по позиции в файле)
-                    best_match = min(suitable_ccvs, key=lambda x: x['dist'])
-                    f_drift = best_match['f']
-                    ccv_label = f"CCV_{best_match['target']}"
+                if matches:
+                    # Если нашли несколько (например, CCV в начале и в конце), берем ближайший
+                    best = min(matches, key=lambda x: x['dist'])
+                    f_drift = best['f']
+                    used_ccv = best['name']
 
-                df_factor = get_dilution_factor(b['Label'])
-                c_final = c_raw * f_drift * df_factor
+                dil = get_df(b['Label'])
+                res = c_raw * f_drift * dil
                 
-                t2_item[el] = f"{c_final:.4f}"
-                t3_item[el] = f"{c_raw:.3f} * {f_drift:.3f} ({ccv_label}) * {df_factor}"
+                t2_r[el] = f"{res:.4f}"
+                t3_r[el] = f"{c_raw:.4f} * {f_drift:.3f} ({used_ccv}) * {dil}"
             
-            t2_rows.append(t2_item)
-            t3_rows.append(t3_item)
+            t2_list.append(t2_r)
+            t3_list.append(t3_r)
 
-    return pd.DataFrame(t1_rows), pd.DataFrame(t2_rows), pd.DataFrame(t3_rows)
+    return pd.DataFrame(t1_list), pd.DataFrame(t2_list), pd.DataFrame(t3_list)
 
-# --- 3. ВЫВОД РЕЗУЛЬТАТОВ ---
-
+# --- 3. ВЫВОД ---
 if uploaded_file and process_btn:
-    data = pd.read_csv(uploaded_file)
-    t1, t2, t3 = process_analytical_data(data)
-    
-    # Сохраняем в session_state для скачивания
-    st.session_state['results'] = (t1, t2, t3)
+    raw = pd.read_csv(uploaded_file)
+    t1, t2, t3 = run_processor(raw)
+    st.session_state['out'] = (t1, t2, t3)
 
-if 'results' in st.session_state:
-    t1, t2, t3 = st.session_state['results']
+if 'out' in st.session_state:
+    t1, t2, t3 = st.session_state['out']
     
-    # Кнопка скачивания Excel
-    buffer = BytesIO()
-    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-        t1.to_excel(writer, sheet_name='Thresholds', index=False)
-        t2.to_excel(writer, sheet_name='Final Results', index=False)
-        t3.to_excel(writer, sheet_name='Math Log', index=False)
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine='xlsxwriter') as wr:
+        t1.to_excel(wr, sheet_name='Thresholds', index=False)
+        t2.to_excel(wr, sheet_name='Final Results', index=False)
+        t3.to_excel(wr, sheet_name='Math Log', index=False)
     
-    st.download_button(
-        label="📥 Download Excel Report",
-        data=buffer.getvalue(),
-        file_name="ICP_Processing_Report.xlsx",
-        mime="application/vnd.ms-excel"
-    )
+    st.download_button("📥 Download Excel Report", buf.getvalue(), "Report.xlsx", "application/vnd.ms-excel")
 
-    # Вкладки с таблицами
-    tabs = st.tabs(["📊 1. Thresholds & RSD", "✅ 2. Final Results", "📝 3. Math Log"])
-    with tabs[0]:
-        st.dataframe(t1, use_container_width=True)
-    with tabs[1]:
-        st.dataframe(t2, use_container_width=True)
-    with tabs[2]:
-        st.dataframe(t3, use_container_width=True)
+    tabs = st.tabs(["📊 Thresholds", "✅ Final Results", "📝 Math Log"])
+    tabs[0].dataframe(t1, use_container_width=True)
+    tabs[1].dataframe(t2, use_container_width=True)
+    tabs[2].dataframe(t3, use_container_width=True)
