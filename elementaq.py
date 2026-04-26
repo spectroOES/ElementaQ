@@ -4,9 +4,9 @@ import numpy as np
 import re
 from io import BytesIO
 
-# --- 1. CONFIG & UI ---
+# --- 1. SETUP ---
 st.set_page_config(layout="wide", page_title="ElementaQ")
-st.title("🔬 ElementaQ: ICP-OES Analytical Engine v13.12")
+st.title("🔬 ElementaQ: ICP-OES Analytical Engine v13.13")
 
 def reset_all():
     st.session_state.results = None
@@ -21,10 +21,10 @@ with st.sidebar:
     st.markdown("---")
     st.header("📈 Drift Calibration (Gaid v2.0)")
     fit_window = st.number_input("CCV Match Window (+/- %)", 5.0, 100.0, 20.0)
-    d_deadband = st.number_input("Tier A: No Correction Zone %", 0.0, 10.0, 5.0)
+    d_deadband = st.number_input("Tier A: Deadband %", 0.0, 10.0, 5.0)
     d_max = st.number_input("Tier C: Failure Limit %", 5.0, 50.0, 10.0)
 
-# --- 2. CORE FUNCTIONS ---
+# --- 2. LOGIC FUNCTIONS ---
 
 def to_num(val):
     if pd.isna(val) or val == "": return None
@@ -44,7 +44,7 @@ def calculate_f_drift(measured, target, deadband, failure_limit):
     elif diff > failure_limit: return 1.0, "Tier C (FAIL)"
     else: return float(target / measured), "Tier B"
 
-# --- 3. PROCESSING ENGINE ---
+# --- 3. PROCESSING ---
 
 uploaded_file = st.file_uploader("Upload ICP CSV", type="csv", on_change=reset_all)
 
@@ -69,7 +69,7 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
                 })
             except: continue
 
-        # 1. DRIFT CALCULATION
+        # Step 1: Compute Drift Factors per Element
         for el in elements:
             ccv_pool = []
             for b in blocks:
@@ -86,7 +86,7 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
                     b['f_drift'][el], b['drift_note'][el] = 1.0, "No Data"
                     continue
 
-                # Filter: Concentration Match (+/- 20%) [cite: 32, 58, 94]
+                # Concentration Match Filter (+/- 20%)
                 match = [p for p in ccv_pool if (1-fit_window/100)*raw <= p['target'] <= (1+fit_window/100)*raw]
                 
                 if not match:
@@ -98,12 +98,11 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
 
                 if before and after:
                     p1, p2 = before[-1], after[0]
-                    # Identical Aliquot Rule [cite: 39, 103]
                     if p1['target'] == p2['target']:
                         if "FAIL" in p1['note'] or "FAIL" in p2['note']:
                             b['f_drift'][el], b['drift_note'][el] = 1.0, "QC FAIL"
                         else:
-                            # Linear Interpolation [cite: 41, 42, 100]
+                            # Linear Interpolation
                             dist, pos = (p2['idx'] - p1['idx']), (b['idx'] - p1['idx'])
                             f_i = p1['f'] + (p2['f'] - p1['f']) * (pos / dist)
                             b['f_drift'][el], b['drift_note'][el] = f_i, f"Interp({p1['target']})"
@@ -116,13 +115,20 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
                 else:
                     b['f_drift'][el], b['drift_note'][el] = 1.0, "No Match"
 
-        # 2. BLANK & FINAL CALC [cite: 18, 62, 109]
-        blanks = {el: np.mean([to_num(b['avg'][el])*b['f_drift'].get(el,1.0) 
-                  for b in blocks if any(x in str(b['Type']).upper() for x in ['BLK','MBB'])]) or 0.0 
-                  for el in elements}
+        # Step 2: Mean Blank Correction
+        blanks = {}
+        for el in elements:
+            valid_b = []
+            for b in blocks:
+                if any(x in str(b['Type']).upper() for x in ['BLK', 'MBB']):
+                    val = to_num(b['avg'][el])
+                    if val is not None:
+                        valid_b.append(val * b['f_drift'].get(el, 1.0))
+            blanks[el] = np.mean(valid_b) if valid_b else 0.0
 
+        # Step 3: Tabulation
         t1_r, t2_r, t3_r = [], [], []
-        mql_map = {el: [] for el in elements}
+        mql_cache = {el: [] for el in elements}
 
         for b in blocks:
             r1, is_loq = {'Label': b['Label'], 'Type': b['Type']}, {}
@@ -130,7 +136,7 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
                 v_raw, v_mql = to_num(b['avg'][el]), (to_num(b['mql'][el]) or 0.0)
                 v_sd = to_num(b['sd'][el]) or 0.0
                 loq = round(v_sd * 10, 4)
-                mql_map[el].append(loq)
+                mql_cache[el].append(loq)
 
                 if v_raw is None or v_raw < v_mql or "<" in str(b['avg'][el]):
                     r1[el], is_loq[el] = f"<{loq}", loq
@@ -154,9 +160,9 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
                         r3[el] = f"({v:.3f}*f:{f:.2f}-bl:{bl:.3f})*DF:{dil}"
                 t2_r.append(r2); t3_r.append(r3)
 
-        # MQL Reference Footer
+        # Footer: MQL Reference
         mq_row = {'Label': '--- MQL REF (SD*10) ---', 'Type': 'REF'}
-        for el in elements: mq_row[el] = round(np.mean(mql_map[el]), 4) if mql_map[el] else 0.0
+        for el in elements: mq_row[el] = round(np.mean(mql_cache[el]), 4) if mql_cache[el] else 0.0
         t1_r.append(mq_row)
 
         st.session_state.results = (pd.DataFrame(t1_r), pd.DataFrame(t2_r), pd.DataFrame(t3_r))
@@ -166,6 +172,6 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
 # --- 4. OUTPUT ---
 if st.session_state.results:
     t1, t2, t3 = st.session_state.results
-    st.subheader("📊 1. Thresholds (with MQL Footer)"); st.dataframe(t1, use_container_width=True)
+    st.subheader("📊 1. Thresholds & MQL Footer"); st.dataframe(t1, use_container_width=True)
     st.subheader("✅ 2. Final Results"); st.dataframe(t2, use_container_width=True)
     st.subheader("📝 3. Math Audit Trail"); st.dataframe(t3, use_container_width=True)
