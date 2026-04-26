@@ -81,6 +81,14 @@ def to_num(val):
     except:
         return None
 
+def is_yttrium_column(col_name):
+    """
+    Checks if column is Yttrium (Internal Standard).
+    Pattern: Column name starts with 'Y ' (Y followed by space)
+    Examples: 'Y 360.073 ( Axial )', 'Y 371.030 ( Radial )'
+    """
+    return str(col_name).strip().startswith('Y ')
+
 def get_target(type_str):
     """Extracts TARGET concentration from CCV/ICV name: 'CCV_0.1' → 0.1"""
     match = re.search(r'_([\d.]+)$', str(type_str))
@@ -339,7 +347,16 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
                     # 📐 Full formula: ((Raw × Drift) − Blank) × Dilution
                     v_raw = to_num(b['avg'][el])
                     f_drift = b['f_drift'].get(el, 1.0)
-                    blank_avg = avg_blanks[el]
+                    
+                    # 🔧 SPECIAL TREATMENT FOR YTTRIUM (Internal Standard)
+                    if is_yttrium_column(el):
+                        # Yttrium: NO blank subtraction (Internal Standard)
+                        blank_avg = 0.0
+                        blank_note = "NO BLK"
+                    else:
+                        # Regular elements: apply blank subtraction
+                        blank_avg = avg_blanks[el]
+                        blank_note = "BLK"
                     
                     final_val = ((v_raw * f_drift) - blank_avg) * dilution
                     row2[el] = f"{final_val:.4f}"
@@ -347,7 +364,7 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
                     # Detailed calculation log
                     note = b['drift_note'].get(el, 'N/A')
                     qc_mark = "[QC FAIL] " if b['qc_fail'].get(el, False) else ""
-                    row3[el] = f"{qc_mark}(({v_raw:.3f}×{f_drift:.3f}[{note}])−{blank_avg:.3f}[BLK])×{dilution}"
+                    row3[el] = f"{qc_mark}(({v_raw:.3f}×{f_drift:.3f}[{note}])−{blank_avg:.3f}[{blank_note}])×{dilution}"
             
             t2_rows.append(row2)
             t3_rows.append(row3)
@@ -395,7 +412,7 @@ if st.session_state.results:
     
     with st.expander("🔍 Table 3: Math Log (Audit Trail)", expanded=True):
         st.dataframe(t3, use_container_width=True, hide_index=True)
-        st.caption("Format: ((Raw×Factor[Note])−Blank[BLK])×Dilution")
+        st.caption("Format: ((Raw×Factor[Note])−Blank[BLK/NO BLK])×Dilution")
     
     # 📊 QC Summary
     st.markdown("---")
