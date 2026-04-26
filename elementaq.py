@@ -51,6 +51,12 @@ def to_num(val):
     except:
         return None
 
+def is_below_loq(raw_value):
+    """Проверяет, помечено ли значение как '<' (ниже предела обнаружения)"""
+    if pd.isna(raw_value):
+        return False
+    return '<' in str(raw_value).strip()
+
 def get_target(type_str):
     """Извлекает TARGET концентрацию из имени пробы: 'CCV_0.1' → 0.1"""
     match = re.search(r'_([\d.]+)$', str(type_str))
@@ -217,23 +223,25 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
                 b['drift_note'][el] = "No Bracket"
     
     # === ШАГ 3: Расчёт среднего бланка (ИСПРАВЛЕННАЯ ЛОГИКА) ===
-    # ИСПРАВЛЕНИЕ: Бланки ниже их собственного MQL или помеченные "<" НЕ учитываются
+    # ИСПРАВЛЕНИЕ: Проверяем ИСХОДНУЮ СТРОКУ на наличие "<" ПЕРЕД конвертацией в число
     avg_blanks = {}
     for el in elements:
         valid_blanks = []
         for b in blocks:
             t = str(b['Type']).upper()
             if any(x in t for x in ['BLK', 'MBB', 'REAGENT']):
-                # Проверяем исходное значение на наличие "<"
-                raw_blank_str = str(b['avg'][el])
-                is_below_loq = '<' in raw_blank_str
+                # 🔍 КРИТИЧЕСКАЯ ПРОВЕРКА: смотрим на исходное значение
+                raw_blank_value = b['avg'][el]
                 
-                if not is_below_loq:
-                    # Только если нет "<", пробуем получить числовое значение
-                    blank_val = to_num(b['avg'][el])
-                    if blank_val is not None:
-                        f = b['f_drift'].get(el, 1.0)
-                        valid_blanks.append(blank_val * f)
+                # Если значение помечено как "<..." — пропускаем его!
+                if is_below_loq(raw_blank_value):
+                    continue
+                
+                # Только если нет "<", пробуем получить числовое значение
+                blank_val = to_num(raw_blank_value)
+                if blank_val is not None:
+                    f = b['f_drift'].get(el, 1.0)
+                    valid_blanks.append(blank_val * f)
         
         # Если валидных бланков нет — среднее равно 0
         avg_blanks[el] = np.mean(valid_blanks) if valid_blanks else 0.0
