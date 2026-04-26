@@ -82,9 +82,30 @@ def to_num(val):
         return None
 
 def get_target(type_str):
-    """Extracts TARGET concentration from sample name: 'CCV_0.1' → 0.1"""
+    """Extracts TARGET concentration from CCV/ICV name: 'CCV_0.1' → 0.1"""
     match = re.search(r'_([\d.]+)$', str(type_str))
     return float(match.group(1)) if match else None
+
+def get_dilution_factor(type_str):
+    """
+    Extracts dilution factor from sample Type.
+    Only samples (starting with 'S') can have dilution.
+    Pattern: S_dil100 → 100.0, S_dil10 → 10.0, S → 1.0
+    Blanks and standards always return 1.0
+    """
+    type_str = str(type_str).strip()
+    
+    # Only samples can be diluted
+    if not type_str.startswith('S'):
+        return 1.0
+    
+    # Look for _dilXX pattern
+    match = re.search(r'_dil(\d+(?:\.\d+)?)$', type_str, re.IGNORECASE)
+    if match:
+        return float(match.group(1))
+    
+    # No dilution specified
+    return 1.0
 
 def calculate_drift_tier(found, target, deadband, max_drift):
     """
@@ -304,7 +325,9 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
         if str(b['Type']).startswith('S'):
             row2 = {'Label': b['Label']}  # Final results
             row3 = {'Label': b['Label']}  # Math log (audit)
-            dilution = get_target(b['Type']) or 1.0
+            
+            # 🔧 CORRECTED: Extract dilution factor from Type (e.g., S_dil100 → 100.0)
+            dilution = get_dilution_factor(b['Type'])
             
             for el in elements:
                 if loq_flags[el] is not None:
