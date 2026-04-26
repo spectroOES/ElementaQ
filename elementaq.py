@@ -7,7 +7,7 @@ from io import BytesIO
 # ==================== 1. НАСТРОЙКИ И ИНТЕРФЕЙС ====================
 st.set_page_config(layout="wide", page_title="ElementaQ v14.0")
 st.title("⚗️ ElementaQ: ICP-OES Analytical Engine v14.0")
-st.caption("Metrology-compliant drift correction with 3-tier filtering")
+st.caption("Metrology-compliant drift correction with 3-tier filtering & Smart Blank Logic")
 
 def reset_all():
     st.session_state.results = None
@@ -216,18 +216,24 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
                 b['f_drift'][el] = 1.0
                 b['drift_note'][el] = "No Bracket"
     
-    # === ШАГ 3: Расчёт среднего бланка (после дрейф-коррекции!) ===
+    # === ШАГ 3: Расчёт среднего бланка (ИСПРАВЛЕННАЯ ЛОГИКА) ===
+    # ИСПРАВЛЕНИЕ: Бланки ниже их собственного MQL не учитываются в среднем
     avg_blanks = {}
     for el in elements:
-        blank_vals = []
+        valid_blanks = []
         for b in blocks:
             t = str(b['Type']).upper()
             if any(x in t for x in ['BLK', 'MBB', 'REAGENT']):
-                val = to_num(b['avg'][el])
-                if val is not None:
+                blank_val = to_num(b['avg'][el])
+                blank_mql = to_num(b['mql'][el]) or 0.0
+                
+                # Если значение числовое и ОНО ВЫШЕ предела обнаружения (MQL)
+                if blank_val is not None and blank_val >= blank_mql:
                     f = b['f_drift'].get(el, 1.0)
-                    blank_vals.append(val * f)  # Бланки тоже корректируем по дрейфу
-        avg_blanks[el] = np.mean(blank_vals) if blank_vals else 0.0
+                    valid_blanks.append(blank_val * f)
+        
+        # Если валидных бланков нет — среднее равно 0
+        avg_blanks[el] = np.mean(valid_blanks) if valid_blanks else 0.0
     
     # === ШАГ 4: Генерация трёх таблиц вывода ===
     t1_rows, t2_rows, t3_rows = [], [], []
