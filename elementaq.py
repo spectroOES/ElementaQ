@@ -18,14 +18,14 @@ if 'results' not in st.session_state:
 with st.sidebar:
     st.header("🔧 QC Settings")
     
-    # RSD Flags as number inputs with clear labels
+    # RSD Flags - Quality of replicate measurements
     rsd_l = st.number_input(
         "Yellow Flag RSD % (Warning)", 
         min_value=1.0, 
         max_value=15.0, 
         value=5.0,
         step=0.5,
-        help="RSD threshold for warning flag"
+        help="RSD threshold for warning flag - indicates minor instability"
     )
     
     rsd_h = st.number_input(
@@ -34,7 +34,7 @@ with st.sidebar:
         max_value=25.0, 
         value=10.0,
         step=0.5,
-        help="RSD threshold for critical flag"
+        help="RSD threshold for critical flag - indicates high variance"
     )
     
     st.markdown("---")
@@ -55,7 +55,7 @@ with st.sidebar:
         max_value=10.0, 
         value=5.0,
         step=0.5,
-        help="Drift within this range is considered stable"
+        help="Drift within this range is considered stable - no correction applied"
     )
     
     d_max = st.number_input(
@@ -64,7 +64,7 @@ with st.sidebar:
         max_value=50.0, 
         value=10.0,
         step=0.5,
-        help="Drift exceeding this value blocks correction"
+        help="Drift exceeding this value blocks correction - instrument needs recalibration"
     )
     
     st.info("📌 Filter #3: Interpolation requires IDENTICAL CCV targets")
@@ -274,21 +274,25 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
     t1_rows, t2_rows, t3_rows = [], [], []
     
     for b in blocks:
-        # ── TABLE 1: Detection Thresholds and LOQ ──
+        # ── TABLE 1: Detection Thresholds and LOQ (with MQL as reference) ──
         row1 = {'Label': b['Label'], 'Type': b['Type']}
         loq_flags = {}
         
         for el in elements:
             raw_v = to_num(b['avg'][el])
-            mql_v = to_num(b['mql'][el]) or 0.0
             sd_v = to_num(b['sd'][el]) or 0.0
-            loq_threshold = max(mql_v, sd_v * 10)  # More conservative threshold
             
-            is_below_loq = (raw_v is None) or (raw_v < loq_threshold) or ('<' in str(b['avg'][el]))
+            # Calculate LOQ as SD × 10 (per user specification)
+            loq_from_sd = sd_v * 10
+            
+            # Check if value is below LOQ: negative OR contains "<"
+            raw_str = str(b['avg'][el])
+            is_below_loq = (raw_v is None) or (raw_v < 0) or ('<' in raw_str)
             
             if is_below_loq:
-                row1[el] = f"<{loq_threshold:.4f}"
-                loq_flags[el] = loq_threshold  # Remember for Hard Lock
+                # Display LOQ calculated from SD
+                row1[el] = f"<{loq_from_sd:.4f}"
+                loq_flags[el] = loq_from_sd  # Remember for Hard Lock
             else:
                 rsd_v = to_num(b['rsd'][el]) or 0.0
                 flag = "!!" if rsd_v > rsd_h else ("!" if rsd_v > rsd_l else "")
@@ -324,6 +328,17 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
             t2_rows.append(row2)
             t3_rows.append(row3)
     
+    # ── Add MQL reference row at the end of Table 1 ──
+    mql_row = {'Label': 'MQL (Reference)', 'Type': 'System'}
+    for el in elements:
+        # Get MQL from the first block (assuming it's consistent across blocks)
+        if blocks:
+            mql_val = to_num(blocks[0]['mql'][el])
+            mql_row[el] = f"{mql_val:.4f}" if mql_val is not None else "N/A"
+        else:
+            mql_row[el] = "N/A"
+    t1_rows.append(mql_row)
+    
     st.session_state.results = (
         pd.DataFrame(t1_rows),
         pd.DataFrame(t2_rows),
@@ -341,7 +356,7 @@ if st.session_state.results:
         t2.to_excel(writer, sheet_name='Report', startrow=len(t1)+5, index=False)
         t3.to_excel(writer, sheet_name='Report', startrow=len(t1)+len(t2)+9, index=False)
         ws = writer.sheets['Report']
-        ws.write(0, 0, "TABLE 1: Detection Thresholds")
+        ws.write(0, 0, "TABLE 1: Detection Thresholds & LOQ (SD×10)")
         ws.write(len(t1)+4, 0, "TABLE 2: Final Results")
         ws.write(len(t1)+len(t2)+8, 0, "TABLE 3: Audit Trail")
     
