@@ -6,7 +6,7 @@ from io import BytesIO
 
 # --- 1. SETTINGS & UI ---
 st.set_page_config(layout="wide", page_title="ElementaQ")
-st.title("🔬 ElementaQ: ICP-OES Analytical Engine v13.9")
+st.title("🔬 ElementaQ: ICP-OES Analytical Engine v13.10")
 
 def reset_all():
     st.session_state.results = None
@@ -35,16 +35,16 @@ def to_num(val):
     except: return None
 
 def get_target(type_str):
-    # Извлекаем теоретическое значение (Target) из имени CCV_0.1 -> 0.1
+    # Извлечение номинала (Target) из названия, напр. CCV_0.1 [cite: 1, 71]
     match = re.search(r'_([\d.]+)$', str(type_str))
     return float(match.group(1)) if match else None
 
 def calculate_f_drift(measured, target, deadband, failure_limit):
     if not measured or not target: return 1.0, "None"
     diff = abs((measured - target) / target) * 100
-    if diff <= deadband: return 1.0, "Tier A (Stable)"
-    elif diff > failure_limit: return 1.0, "Tier C (QC FAIL)"
-    else: return target / measured, "Tier B (Corrected)"
+    if diff <= deadband: return 1.0, "Tier A (Stable)" [cite: 24, 25]
+    elif diff > failure_limit: return 1.0, "Tier C (QC FAIL)" [cite: 27, 28]
+    else: return target / measured, "Tier B (Corrected)" [cite: 26, 35]
 
 # --- 3. PROCESSING ENGINE ---
 
@@ -87,42 +87,38 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
                 b['f_drift'][el], b['drift_note'][el] = 1.0, "No Data"
                 continue
 
-            # Фильтр 1: Concentration Match (+/- 20%)
+            # Фильтр 1: Concentration Match (+/- 20%) [cite: 32, 58]
             valid_ccvs = [p for p in ccv_data if (1 - fit_window/100) * raw <= p['target'] <= (1 + fit_window/100) * raw]
             
             if not valid_ccvs:
                 b['f_drift'][el], b['drift_note'][el] = 1.0, "No Fit"
                 continue
 
-            # Ищем стандарты ДО и ПОСЛЕ
             before = [p for p in valid_ccvs if p['idx'] < b['idx']]
             after = [p for p in valid_ccvs if p['idx'] > b['idx']]
 
             if before and after:
-                p_start = before[-1]
-                p_end = after[0]
-                
-                # Фильтр 3: Identical Target Check
+                p_start, p_end = before[-1], after[0]
+                # Фильтр 3: Identical Target Check [cite: 39, 40]
                 if p_start['target'] == p_end['target']:
-                    # Проверка на QC FAIL (Tier C)
                     if "QC FAIL" in p_start['note'] or "QC FAIL" in p_end['note']:
-                        b['f_drift'][el], b['drift_note'][el] = 1.0, "QC FAIL (Drift >10%)"
+                        b['f_drift'][el], b['drift_note'][el] = 1.0, "Tier C FAIL"
                     else:
-                        # ЛИНЕЙНАЯ ИНТЕРПОЛЯЦИЯ (Глава 5)
+                        # Линейная интерполяция [cite: 37, 42]
                         dist = p_end['idx'] - p_start['idx']
                         pos = b['idx'] - p_start['idx']
                         f_interp = p_start['f'] + (p_end['f'] - p_start['f']) * (pos / dist)
                         b['f_drift'][el], b['drift_note'][el] = f_interp, f"Interp({p_start['target']})"
                 else:
-                    # Разные таргеты -> берем ближайший (Single Point)
                     p_nearest = min([p_start, p_end], key=lambda x: abs(x['idx'] - b['idx']))
                     b['f_drift'][el], b['drift_note'][el] = p_nearest['f'], f"SinglePt({p_nearest['target']})"
-            else:
-                # Только один стандарт рядом -> Single Point
+            elif before or after:
                 p_nearest = before[-1] if before else after[0]
                 b['f_drift'][el], b['drift_note'][el] = p_nearest['f'], f"SinglePt({p_nearest['target']})"
+            else:
+                b['f_drift'][el], b['drift_note'][el] = 1.0, "No Match"
 
-    # 2. BLANKS
+    # 2. BLANKS [cite: 18, 62]
     avg_blanks = {}
     for el in elements:
         vals = [to_num(b['avg'][el]) * b['f_drift'].get(el, 1.0) for b in blocks if any(x in str(b['Type']).upper() for x in ['BLK', 'MBB'])]
@@ -130,7 +126,7 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
 
     # 3. TABLES GENERATION
     t1_r, t2_r, t3_r = [], [], []
-    mql_summary = {'Label': '--- MQL (SD*10) ---', 'Type': 'REFERENCE'}
+    mql_storage = {el: [] for el in elements}
 
     for b in blocks:
         r1, is_loq_row = {'Label': b['Label'], 'Type': b['Type']}, {}
@@ -138,11 +134,9 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
             raw_v, mql_v = to_num(b['avg'][el]), to_num(b['mql'][el]) or 0.0
             sd_v = to_num(b['sd'][el]) or 0.0
             loq_val = round(sd_v * 10, 4)
-            
-            # Собираем данные для итоговой строки MQL
-            if el not in mql_summary: mql_summary[el] = []
-            mql_summary[el].append(loq_val)
+            mql_storage[el].append(loq_val)
 
+            # Проверка порога (Таблица 1)
             if raw_v is None or raw_v < mql_v or "<" in str(b['avg'][el]):
                 r1[el] = f"<{loq_val}"; is_loq_row[el] = loq_val
             else:
@@ -156,19 +150,20 @@ if uploaded_file and st.button("🚀 Execute Analysis"):
             dil = get_target(b['Type']) or 1.0
             for el in elements:
                 if is_loq_row[el] is not None:
+                    # HARD LOCK: Только разбавление [cite: 11, 64]
                     r2[el] = f"<{round(is_loq_row[el] * dil, 4)}"
-                    r3[el] = f"LOQ {is_loq_row[el]} * Dil {dil} (Hard Locked)"
+                    r3[el] = f"LOQ {is_loq_row[el]} * Dil {dil} (Locked)"
                 else:
                     v, f, bl = to_num(b['avg'][el]), b['f_drift'][el], avg_blanks[el]
-                    r2[el] = round((v * f - bl) * dil, 4)
-                    r3[el] = f"({v:.3f} * {f:.3f}[{b['drift_note'][el]}] - {bl:.3f}[BLK]) * {dil}"
+                    res = (v * f - bl) * dil
+                    r2[el] = round(res, 4)
+                    r3[el] = f"({v:.3f} * {f:.2f}[{b['drift_note'][el]}] - {bl:.3f}[BLK]) * {dil}"
             t2_r.append(r2); t3_r.append(r3)
 
-    # Добавляем строку MQL в конец Таблицы 1
-    final_mql_row = {'Label': 'MQL (Reference)', 'Type': 'MQL'}
-    for el in elements:
-        final_mql_row[el] = round(np.mean(mql_summary[el]), 4) if el in mql_summary else "N/A"
-    t1_r.append(final_mql_row)
+    # Добавляем MQL Reference
+    mql_row = {'Label': '--- MQL REF ---', 'Type': 'REF'}
+    for el in elements: mql_row[el] = round(np.mean(mql_storage[el]), 4) if mql_storage[el] else 0.0
+    t1_r.append(mql_row)
 
     st.session_state.results = (pd.DataFrame(t1_r), pd.DataFrame(t2_r), pd.DataFrame(t3_r))
 
@@ -177,11 +172,10 @@ if st.session_state.results:
     t1, t2, t3 = st.session_state.results
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-        t1.to_excel(writer, sheet_name='Report', startrow=1, index=False)
-        t2.to_excel(writer, sheet_name='Report', startrow=len(t1)+5, index=False)
-        t3.to_excel(writer, sheet_name='Report', startrow=len(t1)+len(t2)+9, index=False)
+        t1.to_excel(writer, sheet_name='ElementaQ', startrow=1, index=False)
+        t2.to_excel(writer, sheet_name='ElementaQ', startrow=len(t1)+5, index=False)
     
-    st.download_button("📥 Download Excel Report", buffer.getvalue(), "ElementaQ_v13_9.xlsx")
-    st.subheader("📊 1. Thresholds (with MQL Footer)"); st.dataframe(t1, use_container_width=True)
+    st.download_button("📥 Download Report", buffer.getvalue(), "ElementaQ_v13_10.xlsx")
+    st.subheader("📊 1. Thresholds (with MQL Reference)"); st.dataframe(t1, use_container_width=True)
     st.subheader("✅ 2. Final Results"); st.dataframe(t2, use_container_width=True)
     st.subheader("📝 3. Math Log & Audit Trail"); st.dataframe(t3, use_container_width=True)
