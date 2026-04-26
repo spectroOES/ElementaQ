@@ -51,12 +51,6 @@ def to_num(val):
     except:
         return None
 
-def is_below_loq(raw_value):
-    """Проверяет, помечено ли значение как '<' (ниже предела обнаружения)"""
-    if pd.isna(raw_value):
-        return False
-    return '<' in str(raw_value).strip()
-
 def get_target(type_str):
     """Извлекает TARGET концентрацию из имени пробы: 'CCV_0.1' → 0.1"""
     match = re.search(r'_([\d.]+)$', str(type_str))
@@ -223,23 +217,22 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
                 b['drift_note'][el] = "No Bracket"
     
     # === ШАГ 3: Расчёт среднего бланка (ИСПРАВЛЕННАЯ ЛОГИКА) ===
-    # ИСПРАВЛЕНИЕ: Проверяем ИСХОДНУЮ СТРОКУ на наличие "<" ПЕРЕД конвертацией в число
+    # ИСПРАВЛЕНИЕ: Проверяем значение бланка против LOQ (SD×10), а не ищем "<" в строке
     avg_blanks = {}
     for el in elements:
         valid_blanks = []
         for b in blocks:
             t = str(b['Type']).upper()
             if any(x in t for x in ['BLK', 'MBB', 'REAGENT']):
-                # 🔍 КРИТИЧЕСКАЯ ПРОВЕРКА: смотрим на исходное значение
-                raw_blank_value = b['avg'][el]
+                blank_val = to_num(b['avg'][el])
+                blank_sd = to_num(b['sd'][el]) or 0.0
+                blank_mql = to_num(b['mql'][el]) or 0.0
                 
-                # Если значение помечено как "<..." — пропускаем его!
-                if is_below_loq(raw_blank_value):
-                    continue
+                # 🔍 РАСЧЁТ LOQ ДЛЯ БЛАНКА: max(MQL, SD×10)
+                loq_for_blank = max(blank_mql, blank_sd * 10)
                 
-                # Только если нет "<", пробуем получить числовое значение
-                blank_val = to_num(raw_blank_value)
-                if blank_val is not None:
+                # ✅ Если бланк ниже своего LOQ — исключаем из расчета
+                if blank_val is not None and blank_val >= loq_for_blank:
                     f = b['f_drift'].get(el, 1.0)
                     valid_blanks.append(blank_val * f)
         
