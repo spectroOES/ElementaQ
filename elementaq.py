@@ -5,8 +5,8 @@ import re
 from io import BytesIO
 
 # ==================== 1. SETTINGS AND INTERFACE ====================
-st.set_page_config(layout="wide", page_title="ElementaQ v14.0")
-st.title("⚗️ ElementaQ: ICP-OES Analytical Engine v14.0")
+st.set_page_config(layout="wide", page_title="ElementaQ v14.1")
+st.title("⚗️ ElementaQ: ICP-OES Analytical Engine v14.1")
 st.caption("Metrology-compliant drift correction with 3-tier filtering & Smart Blank Logic")
 
 def reset_all():
@@ -96,10 +96,10 @@ def get_dilution_factor(type_str):
     type_str = str(type_str).strip()
     
     # Only samples can be diluted
-    if not type_str.startswith('S'):
+    if not type_str.upper().startswith('S'):
         return 1.0
     
-    # Look for _dilXX pattern
+    # Look for _dilXX pattern (case insensitive)
     match = re.search(r'_dil(\d+(?:\.\d+)?)$', type_str, re.IGNORECASE)
     if match:
         return float(match.group(1))
@@ -268,7 +268,7 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
                 b['drift_note'][el] = "No Bracket"
     
     # === STEP 3: Calculate average blank (CORRECTED LOGIC) ===
-    # CORRECTION: Check original value for "<" BEFORE conversion to number
+    # Check original value for "<" BEFORE conversion to number
     avg_blanks = {}
     for el in elements:
         valid_blanks = []
@@ -331,7 +331,8 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
             
             for el in elements:
                 if loq_flags[el] is not None:
-                    # 🔒 HARD LOCK: Below LOQ — only dilution, no drift or blank
+                    # 🔒 HARD LOCK: Below LOQ — only dilution applied!
+                    # Result = <(LOQ * Dilution)
                     row2[el] = f"<{loq_flags[el] * dilution:.4f}"
                     row3[el] = f"LOQ<{loq_flags[el]:.4f} × Dil{dilution} [LOCKED]"
                 else:
