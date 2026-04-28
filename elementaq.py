@@ -77,13 +77,13 @@ with st.sidebar:
     
     # RSD Flags
     rsd_l = st.number_input(
-        "Yellow Flag RSD % (Warning)", 
+        "Table 1: Set average RSD% for warning by <!>" ", 
         min_value=1.0, max_value=15.0, value=5.0, step=0.5,
         help="RSD threshold for warning flag"
     )
     
     rsd_h = st.number_input(
-        "Red Flag RSD % (Critical)", 
+        "Table 1: Set average RSD% for warning by <!!> (Critical)", 
         min_value=1.0, max_value=25.0, value=10.0, step=0.5,
         help="RSD threshold for critical flag"
     )
