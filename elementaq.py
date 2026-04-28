@@ -77,7 +77,7 @@ with st.sidebar:
     
     # RSD Flags
     rsd_l = st.number_input(
-        "Table 1: Set average RSD% for warning by <!>" ", 
+        "Table 1: Set average RSD% for warning by <!> ", 
         min_value=1.0, max_value=15.0, value=5.0, step=0.5,
         help="RSD threshold for warning flag"
     )
