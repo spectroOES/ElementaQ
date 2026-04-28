@@ -5,8 +5,8 @@ import re
 from io import BytesIO
 
 # ==================== 1. SETTINGS AND INTERFACE ====================
-st.set_page_config(layout="wide", page_title="ElementaQ v14.1")
-st.title("⚗️ ElementaQ: ICP-OES Analytical Engine v14.1")
+st.set_page_config(layout="wide", page_title="ElementaQ v14.2")
+st.title("⚗️ ElementaQ: ICP-OES Analytical Engine v14.2")
 st.caption("Metrology-compliant drift correction with 3-tier filtering & Smart Blank Logic")
 
 def reset_all():
@@ -40,13 +40,14 @@ with st.sidebar:
     st.markdown("---")
     st.header("📊 Drift Calibration (Chapter 3-5)")
     
+    # 🔧 UPDATED: Default value changed to 50.0%, but remains editable
     fit_window = st.number_input(
         "Filter #1: CCV Match Window (±%)", 
         min_value=5.0, 
-        max_value=100.0, 
-        value=20.0,
-        step=1.0,
-        help="Only CCVs with TARGET within sample ± this % are considered"
+        max_value=200.0, 
+        value=50.0,  # Changed default from 20 to 50
+        step=5.0,
+        help="Recommended: 50% for ICP-OES. Allows correction within one order of magnitude"
     )
     
     d_deadband = st.number_input(
@@ -219,7 +220,7 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
         for el in elements:
             raw_conc = to_num(b['avg'][el])
             
-            # 🎯 FILTER #1: Concentration Match
+            # 🎯 FILTER #1: Concentration Match (Now using 50% default if unchanged)
             candidates = [
                 ccv for ccv in ccv_registry[el]
                 if check_concentration_match(raw_conc, ccv['target'], fit_window)
