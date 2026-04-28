@@ -4,6 +4,63 @@ import numpy as np
 import re
 from io import BytesIO
 
+# ==================== CUSTOM CSS STYLING (DESIGNER EDITION) ====================
+st.markdown("""
+<style>
+    /* General Button Styling */
+    .stButton > button {
+        border-radius: 12px;
+        font-weight: bold;
+        transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+        padding: 0.6rem 1.2rem;
+        letter-spacing: 0.5px;
+    }
+
+    /* Primary Button (Execute Analysis) - Green Gradient & Levitation */
+    .stButton > button[kind="primary"] {
+        background: linear-gradient(135deg, #00b09b 0%, #96c93d 100%);
+        color: white;
+        border: none;
+        box-shadow: 0 4px 15px rgba(0, 176, 155, 0.3);
+    }
+    
+    .stButton > button[kind="primary"]:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 8px 25px rgba(0, 176, 155, 0.5);
+        background: linear-gradient(135deg, #00c4ad 0%, #a8e04d 100%);
+    }
+
+    .stButton > button[kind="primary"]:active {
+        transform: translateY(1px);
+        box-shadow: 0 2px 10px rgba(0, 176, 155, 0.2);
+    }
+
+    /* Secondary Button (Download) - Light Blue Modern Look */
+    .stButton > button[kind="secondary"] {
+        background-color: #e3f2fd;
+        color: #1565c0;
+        border: 2px solid #bbdefb;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+    }
+
+    .stButton > button[kind="secondary"]:hover {
+        background-color: #bbdefb;
+        border-color: #90caf9;
+        transform: scale(1.03);
+        color: #0d47a1;
+    }
+
+    /* File Uploader Styling */
+    .uploadedFile {
+        border-radius: 10px;
+        border: 2px dashed #ccc;
+        padding: 20px;
+        text-align: center;
+        background-color: #fafafa;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # ==================== 1. SETTINGS AND INTERFACE ====================
 st.set_page_config(layout="wide", page_title="ElementaQ v14.3")
 st.title("⚗️ ElementaQ: ICP-OES Analytical Engine v14.3")
@@ -134,12 +191,10 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
     df.columns = df.columns.str.strip()
     
     # 🔍 ROBUST COLUMN DETECTION & VALIDATION
-    # Try to find the 'Type' column under various common names
     type_col_name = find_column_name(df, ['Type', 'Sample Type', 'Type of Sample', 'Sample_Type'])
     label_col_name = find_column_name(df, ['Label', 'Sample Name', 'Name', 'Sample_Label'])
     category_col_name = find_column_name(df, ['Category', 'Parameter', 'Analyte'])
     
-    # 🛑 ERROR HANDLING: If standard columns are missing
     if not type_col_name or not label_col_name or not category_col_name:
         st.error("❌ **Invalid File Format**")
         st.markdown("""
@@ -154,16 +209,13 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
         """)
         st.stop()
 
-    # Identify element columns (exclude metadata)
     metadata_cols = [category_col_name, label_col_name, type_col_name]
     elements = [c for c in df.columns if c not in metadata_cols]
     
-    # Parse data into blocks of 4 rows: Average | SD | RSD | MQL
     blocks = []
     for i in range(0, len(df) - (len(df) % 4), 4):
         sub = df.iloc[i:i+4]
         try:
-            # Use dynamic column names for searching
             avg_row = sub[sub[category_col_name].str.contains('average', case=False, na=False)].iloc[0]
             sd_row = sub[sub[category_col_name].str.contains('SD', case=False, na=False)].iloc[0]
             rsd_row = sub[sub[category_col_name].str.contains('RSD', case=False, na=False)].iloc[0]
@@ -172,7 +224,7 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
             blocks.append({
                 'idx': i // 4,
                 'Label': avg_row[label_col_name],
-                'Type': avg_row[type_col_name], # Use the detected column name
+                'Type': avg_row[type_col_name],
                 'avg': avg_row, 'sd': sd_row, 'rsd': rsd_row, 'mql': mql_row,
                 'f_drift': {}, 'drift_note': {}, 'qc_fail': {}
             })
@@ -360,7 +412,7 @@ if st.session_state.results:
         ws.write(len(t1)+4, 0, "TABLE 2: Final Results")
         ws.write(len(t1)+len(t2)+8, 0, "TABLE 3: Audit Trail")
     
-    st.download_button("📥 Download XLSX Report", buffer.getvalue(), "ElementaQ_Report.xlsx")
+    st.download_button("📥 Download XLSX Report", buffer.getvalue(), "ElementaQ_Report.xlsx", type="secondary")
     
     with st.expander("📋 Table 1: Thresholds & LOQ", expanded=True):
         st.dataframe(t1, use_container_width=True, hide_index=True)
