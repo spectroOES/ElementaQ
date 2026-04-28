@@ -5,9 +5,9 @@ import re
 from io import BytesIO
 
 # ==================== 1. SETTINGS AND INTERFACE ====================
-st.set_page_config(layout="wide", page_title="ElementaQ v14.2")
-st.title("⚗️ ElementaQ: ICP-OES Analytical Engine v14.2")
-st.caption("Metrology-compliant drift correction with 3-tier filtering & Smart Blank Logic")
+st.set_page_config(layout="wide", page_title="ElementaQ v14.3")
+st.title("⚗️ ElementaQ: ICP-OES Analytical Engine v14.3")
+st.caption("Metrology-compliant drift correction with robust column detection")
 
 def reset_all():
     st.session_state.results = None
@@ -18,54 +18,38 @@ if 'results' not in st.session_state:
 with st.sidebar:
     st.header("🔧 QC Settings")
     
-    # RSD Flags - Quality of replicate measurements
+    # RSD Flags
     rsd_l = st.number_input(
         "Yellow Flag RSD % (Warning)", 
-        min_value=1.0, 
-        max_value=15.0, 
-        value=5.0,
-        step=0.5,
-        help="RSD threshold for warning flag - indicates minor instability"
+        min_value=1.0, max_value=15.0, value=5.0, step=0.5,
+        help="RSD threshold for warning flag"
     )
     
     rsd_h = st.number_input(
         "Red Flag RSD % (Critical)", 
-        min_value=1.0, 
-        max_value=25.0, 
-        value=10.0,
-        step=0.5,
-        help="RSD threshold for critical flag - indicates high variance"
+        min_value=1.0, max_value=25.0, value=10.0, step=0.5,
+        help="RSD threshold for critical flag"
     )
     
     st.markdown("---")
-    st.header("📊 Drift Calibration (Chapter 3-5)")
+    st.header("📊 Drift Calibration")
     
-    # 🔧 UPDATED: Default value changed to 50.0%, but remains editable
     fit_window = st.number_input(
         "Filter #1: CCV Match Window (±%)", 
-        min_value=5.0, 
-        max_value=200.0, 
-        value=50.0,  # Changed default from 20 to 50
-        step=5.0,
-        help="Recommended: 50% for ICP-OES. Allows correction within one order of magnitude"
+        min_value=5.0, max_value=200.0, value=50.0, step=5.0,
+        help="Recommended: 50% for ICP-OES"
     )
     
     d_deadband = st.number_input(
         "Tier A: Deadband % (No Correction)", 
-        min_value=0.0, 
-        max_value=10.0, 
-        value=5.0,
-        step=0.5,
-        help="Drift within this range is considered stable - no correction applied"
+        min_value=0.0, max_value=10.0, value=5.0, step=0.5,
+        help="Drift within this range is stable"
     )
     
     d_max = st.number_input(
         "Tier C: Max Drift % (QC FAIL)", 
-        min_value=5.0, 
-        max_value=50.0, 
-        value=10.0,
-        step=0.5,
-        help="Drift exceeding this value blocks correction - instrument needs recalibration"
+        min_value=5.0, max_value=50.0, value=10.0, step=0.5,
+        help="Drift exceeding this blocks correction"
     )
     
     st.info("📌 Filter #3: Interpolation requires IDENTICAL CCV targets")
@@ -82,12 +66,16 @@ def to_num(val):
     except:
         return None
 
+def find_column_name(df, possible_names):
+    """Finds the first column name that matches any of the possible names (case-insensitive)."""
+    cols_lower = {c.lower(): c for c in df.columns}
+    for name in possible_names:
+        if name.lower() in cols_lower:
+            return cols_lower[name.lower()]
+    return None
+
 def is_yttrium_column(col_name):
-    """
-    Checks if column is Yttrium (Internal Standard).
-    Pattern: Column name starts with 'Y ' (Y followed by space)
-    Examples: 'Y 360.073 ( Axial )', 'Y 371.030 ( Radial )'
-    """
+    """Checks if column is Yttrium (Internal Standard)."""
     return str(col_name).strip().startswith('Y ')
 
 def get_target(type_str):
@@ -96,55 +84,34 @@ def get_target(type_str):
     return float(match.group(1)) if match else None
 
 def get_dilution_factor(type_str):
-    """
-    Extracts dilution factor from sample Type.
-    Only samples (starting with 'S') can have dilution.
-    Pattern: S_dil100 → 100.0, S_dil10 → 10.0, S → 1.0
-    Blanks and standards always return 1.0
-    """
+    """Extracts dilution factor from sample Type. Pattern: S_dil100 → 100.0"""
     type_str = str(type_str).strip()
-    
-    # Only samples can be diluted
     if not type_str.upper().startswith('S'):
         return 1.0
-    
-    # Look for _dilXX pattern (case insensitive)
     match = re.search(r'_dil(\d+(?:\.\d+)?)$', type_str, re.IGNORECASE)
     if match:
         return float(match.group(1))
-    
-    # No dilution specified
     return 1.0
 
 def calculate_drift_tier(found, target, deadband, max_drift):
-    """
-    Chapter 3: Three-tiered drift assessment
-    Returns: (factor, status_string, is_fail)
-    """
+    """Three-tiered drift assessment."""
     if found is None or target is None or target == 0:
         return 1.0, "Invalid", False
     
     deviation_pct = abs((found - target) / target) * 100
     
     if deviation_pct <= deadband:
-        # Tier A: Statistically insignificant drift
         return 1.0, f"Stable({deviation_pct:.1f}%)", False
     elif deviation_pct > max_drift:
-        # Tier C: Catastrophic drift — blocking
         return 1.0, f"QC FAIL({deviation_pct:.1f}%)", True
     else:
-        # Tier B: Correctable drift
         factor = target / found
         return factor, f"Corrected({deviation_pct:.1f}%)", False
 
 def check_concentration_match(sample_conc, ccv_target, window_pct):
-    """
-    Filter #1: Concentration Match (Chapter 4)
-    Checks: ccv_target ∈ [sample_conc × (1±window/100)]
-    """
+    """Filter #1: Concentration Match."""
     if sample_conc is None or ccv_target is None:
         return False
-    # Protection against division by zero for zero concentrations
     if sample_conc == 0:
         return ccv_target == 0
     lower = sample_conc * (1 - window_pct / 100)
@@ -152,10 +119,7 @@ def check_concentration_match(sample_conc, ccv_target, window_pct):
     return lower <= ccv_target <= upper
 
 def interpolate_factor(idx_sample, idx_start, idx_end, f_start, f_end):
-    """
-    Chapter 5: Linear interpolation formula
-    fi = fstart + (fend − fstart) × (i − istart) / (iend − istart)
-    """
+    """Linear interpolation formula."""
     if idx_end == idx_start:
         return f_start
     fraction = (idx_sample - idx_start) / (idx_end - idx_start)
@@ -169,8 +133,29 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
     df = pd.read_csv(uploaded_file)
     df.columns = df.columns.str.strip()
     
+    # 🔍 ROBUST COLUMN DETECTION & VALIDATION
+    # Try to find the 'Type' column under various common names
+    type_col_name = find_column_name(df, ['Type', 'Sample Type', 'Type of Sample', 'Sample_Type'])
+    label_col_name = find_column_name(df, ['Label', 'Sample Name', 'Name', 'Sample_Label'])
+    category_col_name = find_column_name(df, ['Category', 'Parameter', 'Analyte'])
+    
+    # 🛑 ERROR HANDLING: If standard columns are missing
+    if not type_col_name or not label_col_name or not category_col_name:
+        st.error("❌ **Invalid File Format**")
+        st.markdown("""
+        Your file is out of standard format. The required columns were not found.
+        
+        **Please format your data table according to instructions presented on this page, then upload.**
+        
+        *Required Columns:*
+        - **Type** (or 'Sample Type'): e.g., S, BLK, CCV_0.1
+        - **Label** (or 'Sample Name'): e.g., smp 1, blank icp
+        - **Category** (or 'Parameter'): Must contain rows for 'Average', 'SD', 'RSD', 'MQL'
+        """)
+        st.stop()
+
     # Identify element columns (exclude metadata)
-    metadata_cols = ['Category', 'Label', 'Type']
+    metadata_cols = [category_col_name, label_col_name, type_col_name]
     elements = [c for c in df.columns if c not in metadata_cols]
     
     # Parse data into blocks of 4 rows: Average | SD | RSD | MQL
@@ -178,29 +163,34 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
     for i in range(0, len(df) - (len(df) % 4), 4):
         sub = df.iloc[i:i+4]
         try:
-            avg_row = sub[sub['Category'].str.contains('average', case=False, na=False)].iloc[0]
-            sd_row = sub[sub['Category'].str.contains('SD', case=False, na=False)].iloc[0]
-            rsd_row = sub[sub['Category'].str.contains('RSD', case=False, na=False)].iloc[0]
-            mql_row = sub[sub['Category'].str.contains('MQL', case=False, na=False)].iloc[0]
+            # Use dynamic column names for searching
+            avg_row = sub[sub[category_col_name].str.contains('average', case=False, na=False)].iloc[0]
+            sd_row = sub[sub[category_col_name].str.contains('SD', case=False, na=False)].iloc[0]
+            rsd_row = sub[sub[category_col_name].str.contains('RSD', case=False, na=False)].iloc[0]
+            mql_row = sub[sub[category_col_name].str.contains('MQL', case=False, na=False)].iloc[0]
             
             blocks.append({
                 'idx': i // 4,
-                'Label': avg_row['Label'],
-                'Type': avg_row['Type'],
+                'Label': avg_row[label_col_name],
+                'Type': avg_row[type_col_name], # Use the detected column name
                 'avg': avg_row, 'sd': sd_row, 'rsd': rsd_row, 'mql': mql_row,
                 'f_drift': {}, 'drift_note': {}, 'qc_fail': {}
             })
         except IndexError:
             continue
     
+    if not blocks:
+        st.error("❌ No data blocks found. Check if 'Category' column contains 'average', 'SD', 'RSD', 'MQL'.")
+        st.stop()
+
     # === STEP 1: Pre-calculate all CCVs for each element ===
     ccv_registry = {}
     for el in elements:
         ccv_registry[el] = []
         for b in blocks:
             if 'CCV' in str(b['Type']).upper():
-                target = get_target(b['Type'])      # TARGET from name (constant)
-                found = to_num(b['avg'][el])         # FOUND from detector (measurement)
+                target = get_target(b['Type'])
+                found = to_num(b['avg'][el])
                 
                 if target and found is not None:
                     factor, status, is_fail = calculate_drift_tier(
@@ -208,11 +198,11 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
                     )
                     ccv_registry[el].append({
                         'idx': b['idx'],
-                        'target': target,    # For Filters #1 and #3
-                        'found': found,      # For factor calculation
+                        'target': target,
+                        'found': found,
                         'factor': factor,
                         'status': status,
-                        'qc_fail': is_fail   # For Filter #2
+                        'qc_fail': is_fail
                     })
     
     # === STEP 2: Apply drift correction to each sample ===
@@ -220,7 +210,6 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
         for el in elements:
             raw_conc = to_num(b['avg'][el])
             
-            # 🎯 FILTER #1: Concentration Match (Now using 50% default if unchanged)
             candidates = [
                 ccv for ccv in ccv_registry[el]
                 if check_concentration_match(raw_conc, ccv['target'], fit_window)
@@ -232,13 +221,11 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
                 b['qc_fail'][el] = False
                 continue
             
-            # Find nearest CCV BEFORE and AFTER sample (by index)
             before = [c for c in candidates if c['idx'] <= b['idx']]
             after = [c for c in candidates if c['idx'] >= b['idx']]
             nearest_before = max(before, key=lambda x: x['idx']) if before else None
             nearest_after = min(after, key=lambda x: x['idx']) if after else None
             
-            # 🎯 FILTER #2: Tier C Failure Check
             if (nearest_before and nearest_before['qc_fail']) or \
                (nearest_after and nearest_after['qc_fail']):
                 b['f_drift'][el] = 1.0
@@ -246,11 +233,8 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
                 b['qc_fail'][el] = True
                 continue
             
-            # 🎯 FILTER #3: Identical Aliquot Rule
             if nearest_before and nearest_after:
-                # Both standards found — check TARGET identity
                 if abs(nearest_before['target'] - nearest_after['target']) < 1e-9:
-                    # ✅ Identical targets → linear interpolation (Chapter 5)
                     f_interp = interpolate_factor(
                         b['idx'],
                         nearest_before['idx'], nearest_after['idx'],
@@ -259,7 +243,6 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
                     b['f_drift'][el] = f_interp
                     b['drift_note'][el] = f"Interp({nearest_before['target']})"
                 else:
-                    # ❌ Different targets → fallback to Single Point Correction (Chapter 4)
                     nearest = min(
                         [c for c in [nearest_before, nearest_after] if c],
                         key=lambda x: abs(x['idx'] - b['idx'])
@@ -276,53 +259,40 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
                 b['f_drift'][el] = 1.0
                 b['drift_note'][el] = "No Bracket"
     
-    # === STEP 3: Calculate average blank (CORRECTED LOGIC) ===
-    # Check original value for "<" BEFORE conversion to number
+    # === STEP 3: Calculate average blank ===
     avg_blanks = {}
     for el in elements:
         valid_blanks = []
         for b in blocks:
             t = str(b['Type']).upper()
             if any(x in t for x in ['BLK', 'MBB', 'REAGENT']):
-                # 🔍 Get ORIGINAL value from CSV as string
                 raw_value_str = str(b['avg'][el])
-                
-                # ✅ CRITICAL CHECK: if "<" present — SKIP this blank!
                 if '<' in raw_value_str:
                     continue
-                
-                # Only if no "<", convert to number
                 blank_val = to_num(raw_value_str)
                 if blank_val is not None:
                     f = b['f_drift'].get(el, 1.0)
                     valid_blanks.append(blank_val * f)
-        
-        # If no valid blanks — average equals 0
         avg_blanks[el] = np.mean(valid_blanks) if valid_blanks else 0.0
     
     # === STEP 4: Generate three output tables ===
     t1_rows, t2_rows, t3_rows = [], [], []
     
     for b in blocks:
-        # ── TABLE 1: Detection Thresholds and LOQ (with MQL as reference) ──
         row1 = {'Label': b['Label'], 'Type': b['Type']}
         loq_flags = {}
         
         for el in elements:
             raw_v = to_num(b['avg'][el])
             sd_v = to_num(b['sd'][el]) or 0.0
-            
-            # Calculate LOQ as SD × 10 (per user specification)
             loq_from_sd = sd_v * 10
             
-            # Check if value is below LOQ: negative OR contains "<"
             raw_str = str(b['avg'][el])
             is_below_loq = (raw_v is None) or (raw_v < 0) or ('<' in raw_str)
             
             if is_below_loq:
-                # Display LOQ calculated from SD
                 row1[el] = f"<{loq_from_sd:.4f}"
-                loq_flags[el] = loq_from_sd  # Remember for Hard Lock
+                loq_flags[el] = loq_from_sd
             else:
                 rsd_v = to_num(b['rsd'][el]) or 0.0
                 flag = "!!" if rsd_v > rsd_h else ("!" if rsd_v > rsd_l else "")
@@ -330,39 +300,29 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
                 loq_flags[el] = None
         t1_rows.append(row1)
         
-        # ── TABLES 2 & 3: Only for samples (type starts with 'S') ──
         if str(b['Type']).startswith('S'):
-            row2 = {'Label': b['Label']}  # Final results
-            row3 = {'Label': b['Label']}  # Math log (audit)
-            
-            # 🔧 CORRECTED: Extract dilution factor from Type (e.g., S_dil100 → 100.0)
+            row2 = {'Label': b['Label']}
+            row3 = {'Label': b['Label']}
             dilution = get_dilution_factor(b['Type'])
             
             for el in elements:
                 if loq_flags[el] is not None:
-                    # 🔒 HARD LOCK: Below LOQ — only dilution applied!
-                    # Result = <(LOQ * Dilution)
                     row2[el] = f"<{loq_flags[el] * dilution:.4f}"
                     row3[el] = f"LOQ<{loq_flags[el]:.4f} × Dil{dilution} [LOCKED]"
                 else:
-                    # 📐 Full formula: ((Raw × Drift) − Blank) × Dilution
                     v_raw = to_num(b['avg'][el])
                     f_drift = b['f_drift'].get(el, 1.0)
                     
-                    # 🔧 SPECIAL TREATMENT FOR YTTRIUM (Internal Standard)
                     if is_yttrium_column(el):
-                        # Yttrium: NO blank subtraction (Internal Standard)
                         blank_avg = 0.0
                         blank_note = "NO BLK"
                     else:
-                        # Regular elements: apply blank subtraction
                         blank_avg = avg_blanks[el]
                         blank_note = "BLK"
                     
                     final_val = ((v_raw * f_drift) - blank_avg) * dilution
                     row2[el] = f"{final_val:.4f}"
                     
-                    # Detailed calculation log
                     note = b['drift_note'].get(el, 'N/A')
                     qc_mark = "[QC FAIL] " if b['qc_fail'].get(el, False) else ""
                     row3[el] = f"{qc_mark}(({v_raw:.3f}×{f_drift:.3f}[{note}])−{blank_avg:.3f}[{blank_note}])×{dilution}"
@@ -370,10 +330,9 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
             t2_rows.append(row2)
             t3_rows.append(row3)
     
-    # ── Add MQL reference row at the end of Table 1 ──
+    # Add MQL reference row
     mql_row = {'Label': 'MQL (Reference)', 'Type': 'System'}
     for el in elements:
-        # Get MQL from the first block (assuming it's consistent across blocks)
         if blocks:
             mql_val = to_num(blocks[0]['mql'][el])
             mql_row[el] = f"{mql_val:.4f}" if mql_val is not None else "N/A"
@@ -391,7 +350,6 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
 if st.session_state.results:
     t1, t2, t3 = st.session_state.results
     
-    # 📥 Excel export with formatting
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
         t1.to_excel(writer, sheet_name='Report', startrow=1, index=False)
@@ -404,7 +362,6 @@ if st.session_state.results:
     
     st.download_button("📥 Download XLSX Report", buffer.getvalue(), "ElementaQ_Report.xlsx")
     
-    # 🖥️ Display in Streamlit
     with st.expander("📋 Table 1: Thresholds & LOQ", expanded=True):
         st.dataframe(t1, use_container_width=True, hide_index=True)
     
@@ -415,7 +372,6 @@ if st.session_state.results:
         st.dataframe(t3, use_container_width=True, hide_index=True)
         st.caption("Format: ((Raw×Factor[Note])−Blank[BLK/NO BLK])×Dilution")
     
-    # 📊 QC Summary
     st.markdown("---")
     col1, col2, col3 = st.columns(3)
     with col1:
