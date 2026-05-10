@@ -62,9 +62,9 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==================== 1. SETTINGS AND INTERFACE ====================
-st.set_page_config(layout="wide", page_title="ElementaQ v14.3")
-st.title("⚗️ ElementaQ: ICP-OES Analytical Engine v14.3")
-st.caption("Metrology-compliant drift correction with robust column detection")
+st.set_page_config(layout="wide", page_title="ElementaQ v15.0")
+st.title("⚗️ ElementaQ: ICP-OES Analytical Engine v15.0")
+st.caption("Metrology-compliant drift correction with Smart Blank Logic & Dirty Blank Protection")
 
 def reset_all():
     st.session_state.results = None
@@ -287,13 +287,17 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
             
             if nearest_before and nearest_after:
                 if abs(nearest_before['target'] - nearest_after['target']) < 1e-9:
-                    f_interp = interpolate_factor(
-                        b['idx'],
-                        nearest_before['idx'], nearest_after['idx'],
-                        nearest_before['factor'], nearest_after['factor']
-                    )
-                    b['f_drift'][el] = f_interp
-                    b['drift_note'][el] = f"Interp({nearest_before['target']})"
+                    if "Stable" in nearest_before['status'] and "Stable" in nearest_after['status']:
+                        b['f_drift'][el] = 1.0
+                        b['drift_note'][el] = f"Stable({nearest_before['target']})"
+                    else:
+                        f_interp = interpolate_factor(
+                            b['idx'],
+                            nearest_before['idx'], nearest_after['idx'],
+                            nearest_before['factor'], nearest_after['factor']
+                        )
+                        b['f_drift'][el] = f_interp
+                        b['drift_note'][el] = f"Interp({nearest_before['target']})"
                 else:
                     nearest = min(
                         [c for c in [nearest_before, nearest_after] if c],
@@ -311,20 +315,31 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
                 b['f_drift'][el] = 1.0
                 b['drift_note'][el] = "No Bracket"
     
-    # === STEP 3: Calculate average blank ===
+    # === STEP 3: Calculate average blank (STRICT LOGIC: BLK ONLY, NO !!) ===
     avg_blanks = {}
     for el in elements:
         valid_blanks = []
         for b in blocks:
-            t = str(b['Type']).upper()
-            if any(x in t for x in ['BLK', 'MBB', 'REAGENT']):
+            t_upper = str(b['Type']).upper()
+            
+            # 1. Check if it is a BLK type (Exclude MBB, REAGENT, etc.)
+            if 'BLK' in t_upper:
                 raw_value_str = str(b['avg'][el])
+                
+                # 2. Exclude values below detection limit (<)
                 if '<' in raw_value_str:
                     continue
+                
                 blank_val = to_num(raw_value_str)
                 if blank_val is not None:
+                    # 3. Exclude blanks with Critical RSD (!!)
+                    rsd_val = to_num(b['rsd'][el]) or 0.0
+                    if rsd_val > rsd_h:
+                        continue # Skip unstable blanks
+                    
                     f = b['f_drift'].get(el, 1.0)
                     valid_blanks.append(blank_val * f)
+        
         avg_blanks[el] = np.mean(valid_blanks) if valid_blanks else 0.0
     
     # === STEP 4: Generate three output tables ===
@@ -359,25 +374,52 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
             
             for el in elements:
                 if loq_flags[el] is not None:
+                    # Hard Lock for LOQ
                     row2[el] = f"<{loq_flags[el] * dilution:.4f}"
                     row3[el] = f"LOQ<{loq_flags[el]:.4f} × Dil{dilution} [LOCKED]"
                 else:
                     v_raw = to_num(b['avg'][el])
                     f_drift = b['f_drift'].get(el, 1.0)
+                    rsd_v = to_num(b['rsd'][el]) or 0.0
+                    
+                    # Format for Table 2: Value + Flag + (RSD%)
+                    flag_str = "!!" if rsd_v > rsd_h else ("!" if rsd_v > rsd_l else "")
+                    rsd_str = f" ({rsd_v:.1f}%)"
                     
                     if is_yttrium_column(el):
+                        # Yttrium: No blank subtraction
                         blank_avg = 0.0
                         blank_note = "NO BLK"
+                        final_val = (v_raw * f_drift) * dilution
+                        
+                        row2[el] = f"{final_val:.4f}{flag_str}{rsd_str}"
+                        qc_mark = "[QC FAIL] " if b['qc_fail'].get(el, False) else ""
+                        row3[el] = f"{qc_mark}(({v_raw:.3f}×{f_drift:.3f}[{b['drift_note'].get(el, 'N/A')}])−{blank_avg:.3f}[{blank_note}])×{dilution}"
+                    
                     else:
+                        # Regular Elements: Subtract Blank
                         blank_avg = avg_blanks[el]
-                        blank_note = "BLK"
-                    
-                    final_val = ((v_raw * f_drift) - blank_avg) * dilution
-                    row2[el] = f"{final_val:.4f}"
-                    
-                    note = b['drift_note'].get(el, 'N/A')
-                    qc_mark = "[QC FAIL] " if b['qc_fail'].get(el, False) else ""
-                    row3[el] = f"{qc_mark}(({v_raw:.3f}×{f_drift:.3f}[{note}])−{blank_avg:.3f}[{blank_note}])×{dilution}"
+                        
+                        # 🛡️ DIRTY BLANK PROTECTION
+                        corrected_signal = v_raw * f_drift
+                        
+                        if corrected_signal <= blank_avg:
+                            # Signal is lost in noise/contamination
+                            # Report as <Blank Value (scaled by dilution)
+                            row2[el] = f"<{blank_avg * dilution:.4f}"
+                            
+                            note = b['drift_note'].get(el, 'N/A')
+                            qc_mark = "[QC FAIL] " if b['qc_fail'].get(el, False) else ""
+                            row3[el] = f"{qc_mark}(({v_raw:.3f}×{f_drift:.3f}[{note}])≤{blank_avg:.3f}[DIRTY BLK])×{dilution}"
+                        else:
+                            # Normal Calculation
+                            final_val = (corrected_signal - blank_avg) * dilution
+                            
+                            row2[el] = f"{final_val:.4f}{flag_str}{rsd_str}"
+                            
+                            note = b['drift_note'].get(el, 'N/A')
+                            qc_mark = "[QC FAIL] " if b['qc_fail'].get(el, False) else ""
+                            row3[el] = f"{qc_mark}(({v_raw:.3f}×{f_drift:.3f}[{note}])−{blank_avg:.3f}[BLK])×{dilution}"
             
             t2_rows.append(row2)
             t3_rows.append(row3)
@@ -422,7 +464,7 @@ if st.session_state.results:
     
     with st.expander("🔍 Table 3: Math Log (Audit Trail)", expanded=True):
         st.dataframe(t3, use_container_width=True, hide_index=True)
-        st.caption("Format: ((Raw×Factor[Note])−Blank[BLK/NO BLK])×Dilution")
+        st.caption("Format: ((Raw×Factor[Note])−Blank[BLK/NO BLK/DIRTY BLK])×Dilution")
     
     st.markdown("---")
     col1, col2, col3 = st.columns(3)
