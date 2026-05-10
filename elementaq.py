@@ -62,8 +62,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==================== 1. SETTINGS AND INTERFACE ====================
-st.set_page_config(layout="wide", page_title="ElementaQ v15.0")
-st.title("⚗️ ElementaQ: ICP-OES Analytical Engine v15.0")
+st.set_page_config(layout="wide", page_title="ElementaQ v15.1")
+st.title("⚗️ ElementaQ: ICP-OES Analytical Engine v15.1")
 st.caption("Metrology-compliant drift correction with Smart Blank Logic & Dirty Blank Protection")
 
 def reset_all():
@@ -382,9 +382,17 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
                     f_drift = b['f_drift'].get(el, 1.0)
                     rsd_v = to_num(b['rsd'][el]) or 0.0
                     
-                    # Format for Table 2: Value + Flag + (RSD%)
-                    flag_str = "!!" if rsd_v > rsd_h else ("!" if rsd_v > rsd_l else "")
-                    rsd_str = f" ({rsd_v:.1f}%)"
+                    # 🎨 FORMATTING LOGIC FOR TABLE 2
+                    # Only show RSD% in parentheses if it is CRITICAL (!! flag)
+                    if rsd_v > rsd_h:
+                        flag_str = "!!"
+                        rsd_str = f" ({rsd_v:.1f}%)"
+                    elif rsd_v > rsd_l:
+                        flag_str = "!"
+                        rsd_str = "" # No parentheses for yellow flag
+                    else:
+                        flag_str = ""
+                        rsd_str = "" # No parentheses for good data
                     
                     if is_yttrium_column(el):
                         # Yttrium: No blank subtraction
