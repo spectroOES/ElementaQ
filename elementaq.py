@@ -62,9 +62,9 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==================== 1. SETTINGS AND INTERFACE ====================
-st.set_page_config(layout="wide", page_title="ElementaQ v15.1")
-st.title("⚗️ ElementaQ: ICP-OES Analytical Engine v15.1")
-st.caption("Metrology-compliant drift correction with Smart Blank Logic & Dirty Blank Protection")
+st.set_page_config(layout="wide", page_title="ElementaQ v15.2")
+st.title("⚗️ ElementaQ: ICP-OES Analytical Engine v15.2")
+st.caption("Metrology-compliant drift correction with Dilution-Normalized Blank Subtraction")
 
 def reset_all():
     st.session_state.results = None
@@ -383,16 +383,15 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
                     rsd_v = to_num(b['rsd'][el]) or 0.0
                     
                     # 🎨 FORMATTING LOGIC FOR TABLE 2
-                    # Only show RSD% in parentheses if it is CRITICAL (!! flag)
                     if rsd_v > rsd_h:
                         flag_str = "!!"
                         rsd_str = f" ({rsd_v:.1f}%)"
                     elif rsd_v > rsd_l:
                         flag_str = "!"
-                        rsd_str = "" # No parentheses for yellow flag
+                        rsd_str = ""
                     else:
                         flag_str = ""
-                        rsd_str = "" # No parentheses for good data
+                        rsd_str = ""
                     
                     if is_yttrium_column(el):
                         # Yttrium: No blank subtraction
@@ -405,29 +404,29 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
                         row3[el] = f"{qc_mark}(({v_raw:.3f}×{f_drift:.3f}[{b['drift_note'].get(el, 'N/A')}])−{blank_avg:.3f}[{blank_note}])×{dilution}"
                     
                     else:
-                        # Regular Elements: Subtract Blank
+                        # 🔧 CORRECTED BLANK LOGIC: Divide blank by dilution before subtraction
                         blank_avg = avg_blanks[el]
+                        adjusted_blank = blank_avg / dilution
                         
                         # 🛡️ DIRTY BLANK PROTECTION
                         corrected_signal = v_raw * f_drift
                         
-                        if corrected_signal <= blank_avg:
-                            # Signal is lost in noise/contamination
-                            # Report as <Blank Value (scaled by dilution)
-                            row2[el] = f"<{blank_avg * dilution:.4f}"
+                        if corrected_signal <= adjusted_blank:
+                            # Signal is lost in background contamination
+                            row2[el] = f"<{blank_avg:.4f}"
                             
                             note = b['drift_note'].get(el, 'N/A')
                             qc_mark = "[QC FAIL] " if b['qc_fail'].get(el, False) else ""
-                            row3[el] = f"{qc_mark}(({v_raw:.3f}×{f_drift:.3f}[{note}])≤{blank_avg:.3f}[DIRTY BLK])×{dilution}"
+                            row3[el] = f"{qc_mark}(({v_raw:.3f}×{f_drift:.3f}[{note}])≤{adjusted_blank:.3f}[DIRTY BLK])×{dilution}"
                         else:
                             # Normal Calculation
-                            final_val = (corrected_signal - blank_avg) * dilution
+                            final_val = (corrected_signal - adjusted_blank) * dilution
                             
                             row2[el] = f"{final_val:.4f}{flag_str}{rsd_str}"
                             
                             note = b['drift_note'].get(el, 'N/A')
                             qc_mark = "[QC FAIL] " if b['qc_fail'].get(el, False) else ""
-                            row3[el] = f"{qc_mark}(({v_raw:.3f}×{f_drift:.3f}[{note}])−{blank_avg:.3f}[BLK])×{dilution}"
+                            row3[el] = f"{qc_mark}(({v_raw:.3f}×{f_drift:.3f}[{note}])−{adjusted_blank:.3f}[BLK])×{dilution}"
             
             t2_rows.append(row2)
             t3_rows.append(row3)
@@ -472,7 +471,7 @@ if st.session_state.results:
     
     with st.expander("🔍 Table 3: Math Log (Audit Trail)", expanded=True):
         st.dataframe(t3, use_container_width=True, hide_index=True)
-        st.caption("Format: ((Raw×Factor[Note])−Blank[BLK/NO BLK/DIRTY BLK])×Dilution")
+        st.caption("Format: ((Raw×Factor[Note])−AdjustedBlank[BLK])×Dilution")
     
     st.markdown("---")
     col1, col2, col3 = st.columns(3)
