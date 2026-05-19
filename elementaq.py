@@ -62,9 +62,9 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==================== 1. SETTINGS AND INTERFACE ====================
-st.set_page_config(layout="wide", page_title="ElementaQ v15.2")
-st.title("⚗️ ElementaQ: ICP-OES Analytical Engine v15.2")
-st.caption("Metrology-compliant drift correction with Dilution-Normalized Blank Subtraction")
+st.set_page_config(layout="wide", page_title="ElementaQ v15.3")
+st.title("⚗️ ElementaQ: ICP-OES Analytical Engine v15.3")
+st.caption("Excel-Ready Export & Metrology-Compliant Logic")
 
 def reset_all():
     st.session_state.results = None
@@ -374,7 +374,7 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
             
             for el in elements:
                 if loq_flags[el] is not None:
-                    # Hard Lock for LOQ
+                    # Hard Lock for LOQ (Text)
                     row2[el] = f"<{loq_flags[el] * dilution:.4f}"
                     row3[el] = f"LOQ<{loq_flags[el]:.4f} × Dil{dilution} [LOCKED]"
                 else:
@@ -382,7 +382,7 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
                     f_drift = b['f_drift'].get(el, 1.0)
                     rsd_v = to_num(b['rsd'][el]) or 0.0
                     
-                    # 🎨 FORMATTING LOGIC FOR TABLE 2
+                    # Formatting flags
                     if rsd_v > rsd_h:
                         flag_str = "!!"
                         rsd_str = f" ({rsd_v:.1f}%)"
@@ -399,12 +399,17 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
                         blank_note = "NO BLK"
                         final_val = (v_raw * f_drift) * dilution
                         
-                        row2[el] = f"{final_val:.4f}{flag_str}{rsd_str}"
+                        # 🛡️ FIX: If clean number, save as FLOAT for Excel formulas
+                        if not flag_str and not rsd_str:
+                            row2[el] = final_val
+                        else:
+                            row2[el] = f"{final_val:.4f}{flag_str}{rsd_str}"
+                            
                         qc_mark = "[QC FAIL] " if b['qc_fail'].get(el, False) else ""
                         row3[el] = f"{qc_mark}(({v_raw:.3f}×{f_drift:.3f}[{b['drift_note'].get(el, 'N/A')}])−{blank_avg:.3f}[{blank_note}])×{dilution}"
                     
                     else:
-                        # 🔧 CORRECTED BLANK LOGIC: Divide blank by dilution before subtraction
+                        # Regular Elements: Subtract Blank
                         blank_avg = avg_blanks[el]
                         adjusted_blank = blank_avg / dilution
                         
@@ -422,7 +427,11 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
                             # Normal Calculation
                             final_val = (corrected_signal - adjusted_blank) * dilution
                             
-                            row2[el] = f"{final_val:.4f}{flag_str}{rsd_str}"
+                            # 🛡️ FIX: If clean number, save as FLOAT for Excel formulas
+                            if not flag_str and not rsd_str:
+                                row2[el] = final_val
+                            else:
+                                row2[el] = f"{final_val:.4f}{flag_str}{rsd_str}"
                             
                             note = b['drift_note'].get(el, 'N/A')
                             qc_mark = "[QC FAIL] " if b['qc_fail'].get(el, False) else ""
@@ -456,12 +465,22 @@ if st.session_state.results:
         t1.to_excel(writer, sheet_name='Report', startrow=1, index=False)
         t2.to_excel(writer, sheet_name='Report', startrow=len(t1)+5, index=False)
         t3.to_excel(writer, sheet_name='Report', startrow=len(t1)+len(t2)+9, index=False)
+        
+        # Add Number Formatting to the final results area to make clean numbers look nice
+        workbook = writer.book
+        worksheet = writer.sheets['Report']
+        num_format = workbook.add_format({'num_format': '0.0000'})
+        
+        # Apply number format to the data columns in Table 2
+        # Assuming Label is col 0, Type is col 1. Data starts at col 2.
+        worksheet.set_column(2, len(elements)+1, 15, num_format)
+        
         ws = writer.sheets['Report']
         ws.write(0, 0, "TABLE 1: Detection Thresholds & LOQ (SD×10)")
-        ws.write(len(t1)+4, 0, "TABLE 2: Final Results")
+        ws.write(len(t1)+4, 0, "TABLE 2: Final Results (Clean Numbers where possible)")
         ws.write(len(t1)+len(t2)+8, 0, "TABLE 3: Audit Trail")
     
-    st.download_button("📥 Download XLSX Report", buffer.getvalue(), "ElementaQ_Report.xlsx", type="secondary")
+    st.download_button("📥 Download XLSX Report (Excel-Ready)", buffer.getvalue(), "ElementaQ_Report.xlsx", type="secondary")
     
     with st.expander("📋 Table 1: Thresholds & LOQ", expanded=True):
         st.dataframe(t1, use_container_width=True, hide_index=True)
@@ -471,7 +490,7 @@ if st.session_state.results:
     
     with st.expander("🔍 Table 3: Math Log (Audit Trail)", expanded=True):
         st.dataframe(t3, use_container_width=True, hide_index=True)
-        st.caption("Format: ((Raw×Factor[Note])−AdjustedBlank[BLK])×Dilution")
+        st.caption("Format: ((Raw×Factor[Note])−Blank[BLK/NO BLK/DIRTY BLK])×Dilution")
     
     st.markdown("---")
     col1, col2, col3 = st.columns(3)
