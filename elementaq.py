@@ -68,6 +68,7 @@ st.caption("Excel-Ready Export & Metrology-Compliant Logic")
 
 def reset_all():
     st.session_state.results = None
+    st.session_state.elements = None
 
 if 'results' not in st.session_state:
     st.session_state.results = None
@@ -211,6 +212,9 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
 
     metadata_cols = [category_col_name, label_col_name, type_col_name]
     elements = [c for c in df.columns if c not in metadata_cols]
+    
+    # Save elements to session state for Excel export
+    st.session_state.elements = elements
     
     blocks = []
     for i in range(0, len(df) - (len(df) % 4), 4):
@@ -374,7 +378,7 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
             
             for el in elements:
                 if loq_flags[el] is not None:
-                    # Hard Lock for LOQ (Text)
+                    # Hard Lock for LOQ
                     row2[el] = f"<{loq_flags[el] * dilution:.4f}"
                     row3[el] = f"LOQ<{loq_flags[el]:.4f} × Dil{dilution} [LOCKED]"
                 else:
@@ -399,7 +403,7 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
                         blank_note = "NO BLK"
                         final_val = (v_raw * f_drift) * dilution
                         
-                        # 🛡️ FIX: If clean number, save as FLOAT for Excel formulas
+                        # FIX: If clean number, save as FLOAT for Excel formulas
                         if not flag_str and not rsd_str:
                             row2[el] = final_val
                         else:
@@ -413,7 +417,7 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
                         blank_avg = avg_blanks[el]
                         adjusted_blank = blank_avg / dilution
                         
-                        # 🛡️ DIRTY BLANK PROTECTION
+                        # DIRTY BLANK PROTECTION
                         corrected_signal = v_raw * f_drift
                         
                         if corrected_signal <= adjusted_blank:
@@ -427,7 +431,7 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
                             # Normal Calculation
                             final_val = (corrected_signal - adjusted_blank) * dilution
                             
-                            # 🛡️ FIX: If clean number, save as FLOAT for Excel formulas
+                            # FIX: If clean number, save as FLOAT for Excel formulas
                             if not flag_str and not rsd_str:
                                 row2[el] = final_val
                             else:
@@ -460,6 +464,9 @@ if uploaded_file and st.button("🚀 Execute Analysis", type="primary"):
 if st.session_state.results:
     t1, t2, t3 = st.session_state.results
     
+    # Get elements from session state (preserved between runs)
+    elements = st.session_state.elements if st.session_state.elements else []
+    
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
         t1.to_excel(writer, sheet_name='Report', startrow=1, index=False)
@@ -473,7 +480,8 @@ if st.session_state.results:
         
         # Apply number format to the data columns in Table 2
         # Assuming Label is col 0, Type is col 1. Data starts at col 2.
-        worksheet.set_column(2, len(elements)+1, 15, num_format)
+        if elements:
+            worksheet.set_column(2, len(elements)+1, 15, num_format)
         
         ws = writer.sheets['Report']
         ws.write(0, 0, "TABLE 1: Detection Thresholds & LOQ (SD×10)")
@@ -503,5 +511,5 @@ if st.session_state.results:
                  for v in t1[c] if '!!' in str(v))
         st.metric("🔴 High RSD", red)
     with col3:
-        fail = sum(1 for b in blocks for el in elements if b['qc_fail'].get(el, False))
+        fail = sum(1 for b in blocks for el in elements if b['qc_fail'].get(el, False)) if 'blocks' in locals() else 0
         st.metric("⚠️ QC FAIL", fail)
